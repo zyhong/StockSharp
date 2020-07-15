@@ -1,8 +1,12 @@
 namespace StockSharp.Algo
 {
+	using System.Collections.Generic;
+	using System.Linq;
+
 	using Ecng.Collections;
 	using Ecng.Common;
 
+	using StockSharp.Logging;
 	using StockSharp.Messages;
 
 	/// <summary>
@@ -12,21 +16,17 @@ namespace StockSharp.Algo
 	{
 		private sealed class Level1DepthBuilder
 		{
-			private readonly SecurityId _securityId;
 			private decimal? _bidPrice, _askPrice, _bidVolume, _askVolume;
-
-			public bool HasDepth { get; set; }
 
 			public Level1DepthBuilder(SecurityId securityId)
 			{
-				_securityId = securityId;
+				SecurityId = securityId;
 			}
+
+			public readonly SecurityId SecurityId;
 
 			public QuoteChangeMessage Process(Level1ChangeMessage message)
 			{
-				if (HasDepth)
-					return null;
-
 				var bidPrice = (decimal?)message.Changes.TryGetValue(Level1Fields.BestBidPrice);
 				var askPrice = (decimal?)message.Changes.TryGetValue(Level1Fields.BestAskPrice);
 
@@ -46,18 +46,29 @@ namespace StockSharp.Algo
 
 				return new QuoteChangeMessage
 				{
-					SecurityId = _securityId,
+					SecurityId = SecurityId,
 					ServerTime = message.ServerTime,
 					LocalTime = message.LocalTime,
-					IsByLevel1 = true,
+					BuildFrom = DataType.Level1,
 					Bids = bidPrice == null ? ArrayHelper.Empty<QuoteChange>() : new[] { new QuoteChange(bidPrice.Value, bidVolume ?? 0) },
 					Asks = askPrice == null ? ArrayHelper.Empty<QuoteChange>() : new[] { new QuoteChange(askPrice.Value, askVolume ?? 0) },
 				};
 			}
 		}
 
-		private readonly SynchronizedDictionary<SecurityId, Level1DepthBuilder> _level1DepthBuilders = new SynchronizedDictionary<SecurityId, Level1DepthBuilder>();
+		private class BookInfo
+		{
+			public BookInfo(Level1DepthBuilder builder) => Builder = builder;
 
+			public readonly Level1DepthBuilder Builder;
+			public readonly CachedSynchronizedSet<long> SubscriptionIds = new CachedSynchronizedSet<long>();
+		}
+
+		private readonly SyncObject _syncObject = new SyncObject();
+
+		private readonly Dictionary<long, BookInfo> _byId = new Dictionary<long, BookInfo>();
+		private readonly Dictionary<SecurityId, BookInfo> _online = new Dictionary<SecurityId, BookInfo>();
+		
 		/// <summary>
 		/// Initializes a new instance of the <see cref="Level1DepthBuilderAdapter"/>.
 		/// </summary>
@@ -68,54 +79,216 @@ namespace StockSharp.Algo
 		}
 
 		/// <inheritdoc />
-		protected override void OnInnerAdapterNewOutMessage(Message message)
+		public override bool SendInMessage(Message message)
 		{
 			switch (message.Type)
 			{
 				case MessageTypes.Reset:
-					_level1DepthBuilders.Clear();
-					break;
-
-				case MessageTypes.Level1Change:
 				{
-					var level1Msg = (Level1ChangeMessage)message;
-
-					// генерация стакана из Level1
-					var quoteMsg = GetBuilder(level1Msg.SecurityId).Process(level1Msg);
-
-					if (quoteMsg != null)
-						base.OnInnerAdapterNewOutMessage(quoteMsg);
-
+					lock (_syncObject)
+					{
+						_byId.Clear();
+						_online.Clear();
+					}
+					
 					break;
 				}
 
-				case MessageTypes.QuoteChange:
+				case MessageTypes.MarketData:
 				{
-					var quoteMsg = (QuoteChangeMessage)message;
+					var mdMsg = (MarketDataMessage)message;
 
-					if (quoteMsg.State != null)
-						break;
+					if (mdMsg.IsSubscribe)
+					{
+						if (mdMsg.SecurityId == default || mdMsg.DataType2 != DataType.MarketDepth)
+							break;
 
-					GetBuilder(quoteMsg.SecurityId).HasDepth = true;
+						if (mdMsg.BuildMode == MarketDataBuildModes.Load)
+							break;
+
+						if (mdMsg.BuildFrom != null && mdMsg.BuildFrom != DataType.Level1)
+							break;
+
+						var transId = mdMsg.TransactionId;
+
+						lock (_syncObject)
+						{
+							var info = new BookInfo(new Level1DepthBuilder(mdMsg.SecurityId));
+							info.SubscriptionIds.Add(transId);
+							_byId.Add(transId, info);
+						}
+						
+						mdMsg = mdMsg.TypedClone();
+						mdMsg.DataType2 = DataType.Level1;
+						message = mdMsg;
+
+						this.AddDebugLog("L1->OB {0} added.", transId);
+					}
+					else
+					{
+						RemoveSubscription(mdMsg.OriginalTransactionId);
+					}
+
 					break;
 				}
 			}
 
-			base.OnInnerAdapterNewOutMessage(message);
+			return base.SendInMessage(message);
 		}
 
-		private Level1DepthBuilder GetBuilder(SecurityId securityId)
+		private void RemoveSubscription(long id)
 		{
-			return _level1DepthBuilders.SafeAdd(securityId, c => new Level1DepthBuilder(c));
+			lock (_syncObject)
+			{
+				var changeId = true;
+
+				if (!_byId.TryGetAndRemove(id, out var info))
+				{
+					changeId = false;
+
+					info = _online.FirstOrDefault(p => p.Value.SubscriptionIds.Contains(id)).Value;
+
+					if (info == null)
+						return;
+				}
+
+				var secId = info.Builder.SecurityId;
+
+				if (info != _online.TryGetValue(secId))
+					return;
+
+				info.SubscriptionIds.Remove(id);
+
+				var ids = info.SubscriptionIds.Cache;
+
+				if (ids.Length == 0)
+					_online.Remove(secId);
+				else if (changeId)
+					_byId.Add(ids[0], info);
+			}
+
+			this.AddDebugLog("L1->OB {0} removed.", id);
+		}
+
+		/// <inheritdoc />
+		protected override void OnInnerAdapterNewOutMessage(Message message)
+		{
+			List<QuoteChangeMessage> books = null;
+			
+			switch (message.Type)
+			{
+				case MessageTypes.SubscriptionResponse:
+				{
+					var responseMsg = (SubscriptionResponseMessage)message;
+
+					if (!responseMsg.IsOk())
+						RemoveSubscription(responseMsg.OriginalTransactionId);
+
+					break;
+				}
+
+				case MessageTypes.SubscriptionFinished:
+				{
+					RemoveSubscription(((SubscriptionFinishedMessage)message).OriginalTransactionId);
+					break;
+				}
+
+				case MessageTypes.SubscriptionOnline:
+				{
+					var id = ((SubscriptionOnlineMessage)message).OriginalTransactionId;
+
+					lock (_syncObject)
+					{
+						if (_byId.TryGetValue(id, out var info))
+						{
+							var secId = info.Builder.SecurityId;
+
+							if (_online.TryGetValue(secId, out var online))
+							{
+								online.SubscriptionIds.Add(id);
+								_byId.Remove(id);
+							}
+							else
+							{
+								_online.Add(secId, info);
+							}
+						}
+					}
+					
+					break;
+				}
+
+				case MessageTypes.Level1Change:
+				{
+					lock (_syncObject)
+					{
+						if (_byId.Count == 0 && _online.Count == 0)
+							break;
+					}
+
+					var level1Msg = (Level1ChangeMessage)message;
+
+					var ids = level1Msg.GetSubscriptionIds();
+
+					HashSet<long> leftIds = null;
+
+					lock (_syncObject)
+					{
+						foreach (var id in ids)
+						{
+							if (!_byId.TryGetValue(id, out var info))
+								continue;
+						
+							var quoteMsg = info.Builder.Process(level1Msg);
+
+							if (quoteMsg == null)
+								continue;
+							
+							quoteMsg.SetSubscriptionIds(info.SubscriptionIds.Cache);
+
+							if (books == null)
+								books = new List<QuoteChangeMessage>();
+
+							books.Add(quoteMsg);
+
+							if (leftIds == null)
+								leftIds = new HashSet<long>(ids);
+
+							leftIds.RemoveRange(info.SubscriptionIds.Cache);
+						}
+					}
+						
+					if (leftIds != null)
+					{
+						if (leftIds.Count == 0)
+						{
+							message = null;
+							break;
+						}
+
+						level1Msg.SetSubscriptionIds(leftIds.ToArray());
+					}
+
+					break;
+				}
+			}
+
+			if (message != null)
+				base.OnInnerAdapterNewOutMessage(message);
+
+			if (books != null)
+			{
+				foreach (var book in books)
+				{
+					base.OnInnerAdapterNewOutMessage(book);
+				}
+			}
 		}
 
 		/// <summary>
 		/// Create a copy of <see cref="Level1DepthBuilderAdapter"/>.
 		/// </summary>
 		/// <returns>Copy.</returns>
-		public override IMessageChannel Clone()
-		{
-			return new Level1DepthBuilderAdapter(InnerAdapter);
-		}
+		public override IMessageChannel Clone() => new Level1DepthBuilderAdapter(InnerAdapter.TypedClone());
 	}
 }

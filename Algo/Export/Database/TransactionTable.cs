@@ -124,6 +124,11 @@ namespace StockSharp.Algo.Export.Database
 				DbType = typeof(string),
 				ValueRestriction = new StringRestriction(32)
 			};
+			yield return new ColumnDescription(nameof(ExecutionMessage.StrategyId))
+			{
+				DbType = typeof(string),
+				ValueRestriction = new StringRestriction(32)
+			};
 			yield return new ColumnDescription(nameof(ExecutionMessage.Currency)) { DbType = typeof(int?) };
 			yield return new ColumnDescription(nameof(ExecutionMessage.Error))
 			{
@@ -139,6 +144,7 @@ namespace StockSharp.Algo.Export.Database
 			yield return new ColumnDescription(nameof(ExecutionMessage.PositionEffect)) { DbType = typeof(int?) };
 			yield return new ColumnDescription(nameof(ExecutionMessage.PostOnly)) { DbType = typeof(bool?) };
 			yield return new ColumnDescription(nameof(ExecutionMessage.Initiator)) { DbType = typeof(bool?) };
+			yield return new ColumnDescription(nameof(ExecutionMessage.SeqNum)) { DbType = typeof(long) };
 		}
 
 		protected override IDictionary<string, object> ConvertToParameters(ExecutionMessage value)
@@ -186,6 +192,7 @@ namespace StockSharp.Algo.Export.Database
 				{ nameof(ExecutionMessage.PnL), value.PnL },
 				{ nameof(ExecutionMessage.OpenInterest), value.OpenInterest },
 				{ nameof(ExecutionMessage.UserOrderId), value.UserOrderId },
+				{ nameof(ExecutionMessage.StrategyId), value.StrategyId },
 				{ nameof(ExecutionMessage.Currency), (int?)value.Currency },
 				{ nameof(ExecutionMessage.Error), value.Error?.Message },
 				{ nameof(ExecutionMessage.IsMargin), value.IsMargin },
@@ -197,6 +204,7 @@ namespace StockSharp.Algo.Export.Database
 				{ nameof(ExecutionMessage.PositionEffect), (int?)value.PositionEffect },
 				{ nameof(ExecutionMessage.PostOnly), value.PostOnly },
 				{ nameof(ExecutionMessage.Initiator), value.Initiator },
+				{ nameof(ExecutionMessage.SeqNum), value.SeqNum },
 			};
 			return result;
 		}

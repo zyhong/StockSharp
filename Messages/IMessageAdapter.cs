@@ -202,9 +202,25 @@ namespace StockSharp.Messages
 		bool IsAutoReplyOnTransactonalUnsubscription { get; }
 
 		/// <summary>
-		/// Adapters translates orders changes on reply of <see cref="OrderStatusMessage"/>.
+		/// Adapter translates orders changes on reply of <see cref="OrderStatusMessage"/>.
 		/// </summary>
 		bool IsSupportTransactionLog { get; }
+
+		/// <summary>
+		/// Adapter required emulation <see cref="PositionChangeMessage"/>.
+		/// </summary>
+		/// <remarks><see langword="null"/> means no emulatior, <see langword="true"/> by order balance, <see langword="false"/> by trades.</remarks>
+		bool? IsPositionsEmulationRequired { get; }
+
+		/// <summary>
+		/// Is the <see cref="OrderReplaceMessage"/> command edit a current order.
+		/// </summary>
+		bool IsReplaceCommandEditCurrent { get; }
+
+		/// <summary>
+		/// Generate <see cref="QuoteChangeMessage"/> from <see cref="Level1ChangeMessage"/>.
+		/// </summary>
+		bool GenerateOrderBookFromLevel1 { get; set; }
 
 		/// <summary>
 		/// Create market depth builder.
@@ -244,6 +260,16 @@ namespace StockSharp.Messages
 		/// <param name="dataType">Data type info.</param>
 		/// <returns>Check result.</returns>
 		bool IsSecurityRequired(DataType dataType);
+
+		/// <summary>
+		/// Use <see cref="IMessageChannel"/> for in and out messages.
+		/// </summary>
+		bool UseChannels { get; }
+
+		/// <summary>
+		/// Feature name.
+		/// </summary>
+		string FeatureName { get; }
 	}
 
 	/// <summary>

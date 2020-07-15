@@ -18,6 +18,56 @@ namespace StockSharp.Localization
 	partial class LocalizedStrings
 	{
 		/// <summary>
+		/// Cancel '{0}' orders with price {1}.
+		/// </summary>
+		public const string CancelOrdersWithPriceParamsKey = nameof(CancelOrdersWithPriceParams);
+
+		/// <summary>
+		/// Cancel '{0}' orders with price {1}.
+		/// </summary>
+		public static string CancelOrdersWithPriceParams => GetString(CancelOrdersWithPriceParamsKey);
+
+		/// <summary>
+		/// Press Escape to cancel operation.
+		/// </summary>
+		public const string PressEscToCancelKey = nameof(PressEscToCancel);
+
+		/// <summary>
+		/// Press Escape to cancel operation.
+		/// </summary>
+		public static string PressEscToCancel => GetString(PressEscToCancelKey);
+
+		/// <summary>
+		/// Move '{0}' orders from price {1} to {2}.
+		/// </summary>
+		public const string MovingOrdersParamsKey = nameof(MovingOrdersParams);
+
+		/// <summary>
+		/// Move '{0}' orders from price {1} to {2}.
+		/// </summary>
+		public static string MovingOrdersParams => GetString(MovingOrdersParamsKey);
+
+		/// <summary>
+		/// Session was not selected.
+		/// </summary>
+		public const string SessionNotSelectedKey = nameof(SessionNotSelected);
+
+		/// <summary>
+		/// Session was not selected.
+		/// </summary>
+		public static string SessionNotSelected => GetString(SessionNotSelectedKey);
+
+		/// <summary>
+		/// This connection uses paid options. Click for detailed info.
+		/// </summary>
+		public const string PaidConnectorToolipKey = nameof(PaidConnectorToolip);
+
+		/// <summary>
+		/// This connection uses paid options. Click for detailed info.
+		/// </summary>
+		public static string PaidConnectorToolip => GetString(PaidConnectorToolipKey);
+
+		/// <summary>
 		/// Switch axis location
 		/// </summary>
 		public const string SwitchAxisLocationKey = nameof(SwitchAxisLocation);
@@ -9148,12 +9198,12 @@ namespace StockSharp.Localization
 		public static string Str894 => GetString(Str894Key);
 
 		/// <summary>
-		/// Order volume cannot be less than zero.
+		/// Volume for the price {0} cannot be less than zero.
 		/// </summary>
 		public const string Str895Key = nameof(Str895);
 
 		/// <summary>
-		/// Order volume cannot be less than zero.
+		/// Volume for the price {0} cannot be less than zero.
 		/// </summary>
 		public static string Str895 => GetString(Str895Key);
 
@@ -21568,12 +21618,12 @@ namespace StockSharp.Localization
 		public static string Str2220 => GetString(Str2220Key);
 
 		/// <summary>
-		/// Auto-stop
+		/// Autostop
 		/// </summary>
 		public const string Str2221Key = nameof(Str2221);
 
 		/// <summary>
-		/// Auto-stop
+		/// Autostop
 		/// </summary>
 		public static string Str2221 => GetString(Str2221Key);
 
@@ -21588,12 +21638,12 @@ namespace StockSharp.Localization
 		public static string Str2222 => GetString(Str2222Key);
 
 		/// <summary>
-		/// Time for auto-stop
+		/// Time for autostop
 		/// </summary>
 		public const string Str2223Key = nameof(Str2223);
 
 		/// <summary>
-		/// Time for auto-stop
+		/// Time for autostop
 		/// </summary>
 		public static string Str2223 => GetString(Str2223Key);
 
@@ -51776,5 +51826,75 @@ namespace StockSharp.Localization
 		/// Used to identify whether the order initiator is an aggressor or not in the trade.
 		/// </summary>
 		public static string InitiatorTrade => GetString(InitiatorTradeKey);
+
+		/// <summary>
+		/// Dark
+		/// </summary>
+		public const string DarkKey = nameof(Dark);
+
+		/// <summary>
+		/// Dark
+		/// </summary>
+		public static string Dark => GetString(DarkKey);
+
+		/// <summary>
+		/// Dark theme.
+		/// </summary>
+		public const string DarkThemeKey = nameof(DarkTheme);
+
+		/// <summary>
+		/// Dark theme.
+		/// </summary>
+		public static string DarkTheme => GetString(DarkThemeKey);
+
+		/// <summary>
+		/// Sequence number.
+		/// </summary>
+		public const string SequenceNumberKey = nameof(SequenceNumber);
+
+		/// <summary>
+		/// Sequence number.
+		/// </summary>
+		public static string SequenceNumber => GetString(SequenceNumberKey);
+
+		/// <summary>
+		/// Will be available soon.
+		/// </summary>
+		public const string AvailableSoonKey = nameof(AvailableSoon);
+
+		/// <summary>
+		/// Will be available soon.
+		/// </summary>
+		public static string AvailableSoon => GetString(AvailableSoonKey);
+
+		/// <summary>
+		/// Edition
+		/// </summary>
+		public const string EditionKey = nameof(Edition);
+
+		/// <summary>
+		/// Edition
+		/// </summary>
+		public static string Edition => GetString(EditionKey);
+
+		/// <summary>
+		/// Time taken to edit an order.
+		/// </summary>
+		public const string EditionLatencyKey = nameof(EditionLatency);
+
+		/// <summary>
+		/// Time taken to edit an order.
+		/// </summary>
+		public static string EditionLatency => GetString(EditionLatencyKey);
+
+		/// <summary>
+		/// Filtered book
+		/// </summary>
+		public const string FilteredBookKey = nameof(FilteredBook);
+
+		/// <summary>
+		/// Filtered book
+		/// </summary>
+		public static string FilteredBook => GetString(FilteredBookKey);
 	}
 }

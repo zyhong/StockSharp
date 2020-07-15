@@ -3,6 +3,7 @@ namespace StockSharp.Algo.Storages
 	using System;
 	using System.Threading;
 	using System.Linq;
+	using System.Collections.Generic;
 
 	using Ecng.Common;
 	using Ecng.Collections;
@@ -72,7 +73,7 @@ namespace StockSharp.Algo.Storages
 			{
 				case MessageTypes.Reset:
 					Reset();
-					Buffer.SendInMessage(message);
+					Buffer.ProcessInMessage(message);
 					break;
 
 				case MessageTypes.Connect:
@@ -94,7 +95,7 @@ namespace StockSharp.Algo.Storages
 				case MessageTypes.OrderRegister:
 				{
 					if (Buffer.EnabledTransactions)
-						Buffer.SendInMessage(message);
+						Buffer.ProcessInMessage(message);
 
 					break;
 				}
@@ -104,9 +105,11 @@ namespace StockSharp.Algo.Storages
 					{
 						var replaceMsg = (OrderReplaceMessage)message;
 
-						_replaceTransactions.TryAdd(replaceMsg.TransactionId, replaceMsg.OriginalTransactionId);
+						// can be looped back from offline
+						if (!_replaceTransactions.ContainsKey(replaceMsg.TransactionId))
+							_replaceTransactions.Add(replaceMsg.TransactionId, replaceMsg.OriginalTransactionId);
 
-						Buffer.SendInMessage(replaceMsg);
+						Buffer.ProcessInMessage(replaceMsg);
 					}
 					
 					break;
@@ -117,10 +120,14 @@ namespace StockSharp.Algo.Storages
 					{
 						var pairMsg = (OrderPairReplaceMessage)message;
 						
-						_replaceTransactions.TryAdd(pairMsg.Message1.TransactionId, pairMsg.Message1.OriginalTransactionId);
-						_replaceTransactions.TryAdd(pairMsg.Message2.TransactionId, pairMsg.Message2.OriginalTransactionId);
+						// can be looped back from offline
+						if (!_replaceTransactions.ContainsKey(pairMsg.Message1.TransactionId))
+						{
+							_replaceTransactions.Add(pairMsg.Message1.TransactionId, pairMsg.Message1.OriginalTransactionId);
+							_replaceTransactions.Add(pairMsg.Message2.TransactionId, pairMsg.Message2.OriginalTransactionId);
+						}
 
-						Buffer.SendInMessage(message);
+						Buffer.ProcessInMessage(message);
 					}
 
 					break;
@@ -133,7 +140,8 @@ namespace StockSharp.Algo.Storages
 						var cancelMsg = (OrderCancelMessage)message;
 
 						// can be looped back from offline
-						_cancellationTransactions.TryAdd(cancelMsg.TransactionId, cancelMsg.OriginalTransactionId);
+						if (!_cancellationTransactions.ContainsKey(cancelMsg.TransactionId))
+							_cancellationTransactions.Add(cancelMsg.TransactionId, cancelMsg.OriginalTransactionId);
 					}
 					
 					break;
@@ -154,7 +162,7 @@ namespace StockSharp.Algo.Storages
 			if (message is null)
 				throw new ArgumentNullException(nameof(message));
 
-			Buffer.SendInMessage(message);
+			Buffer.ProcessInMessage(message);
 
 			if (message.IsSubscribe && message.From == null && message.To == null && Settings.IsMode(StorageModes.Snapshot))
 			{
@@ -232,10 +240,24 @@ namespace StockSharp.Algo.Storages
 
 				if (Settings.IsMode(StorageModes.Snapshot))
 				{
+					var states = message.States.ToHashSet();
+
+					var ordersIds = new HashSet<long>();
+					
 					var storage = (ISnapshotStorage<string, ExecutionMessage>)GetSnapshotStorage(DataType.Transactions);
 
 					foreach (var snapshot in storage.GetAll(from, to))
 					{
+						if (snapshot.HasOrderInfo)
+						{
+							if (!snapshot.IsMatch(message, states))
+								continue;
+
+							ordersIds.Add(snapshot.TransactionId);
+						}
+						else if (!ordersIds.Contains(snapshot.TransactionId))
+							continue;
+
 						snapshot.OriginalTransactionId = transId;
 						snapshot.SetSubscriptionIds(subscriptionId: transId);
 						RaiseNewOutMessage(snapshot);
@@ -267,7 +289,7 @@ namespace StockSharp.Algo.Storages
 		/// <inheritdoc />
 		protected override void OnInnerAdapterNewOutMessage(Message message)
 		{
-			Buffer.SendOutMessage(message);
+			Buffer.ProcessOutMessage(message);
 
 			base.OnInnerAdapterNewOutMessage(message);
 		}
@@ -355,7 +377,7 @@ namespace StockSharp.Algo.Storages
 								{
 									if (message.Error == null)
 									{
-										var replaced = (ExecutionMessage)snapshotStorage.Get(replacedId);
+										var replaced = (ExecutionMessage)snapshotStorage.Get(replacedId.To<string>());
 
 										if (replaced == null)
 											this.AddWarningLog("Replaced order {0} not found.", replacedId);
@@ -435,6 +457,13 @@ namespace StockSharp.Algo.Storages
 					if (news.Length > 0)
 					{
 						Settings.GetStorage<NewsMessage>(default, null).Save(news);
+					}
+
+					var boardStates = Buffer.GetBoardStates().ToArray();
+
+					if (boardStates.Length > 0)
+					{
+						Settings.GetStorage<BoardStateMessage>(default, null).Save(boardStates);
 					}
 				}
 				catch (Exception excp)

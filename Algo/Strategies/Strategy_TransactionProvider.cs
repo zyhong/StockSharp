@@ -2,9 +2,7 @@ namespace StockSharp.Algo.Strategies
 {
 	using System;
 	using System.Collections.Generic;
-	using System.Linq;
 
-	using Ecng.Collections;
 	using Ecng.Common;
 
 	using StockSharp.BusinessEntities;
@@ -12,68 +10,6 @@ namespace StockSharp.Algo.Strategies
 
 	partial class Strategy
 	{
-		private Position ProcessPositionInfo(Tuple<SecurityId, string> key, decimal value)
-		{
-			var security = SafeGetConnector().LookupById(key.Item1);
-			var pf = SafeGetConnector().LookupByPortfolioName(key.Item2);
-			var position = _positions.SafeAdd(Tuple.Create(security, pf), k => new Position
-			{
-				Security = security,
-				Portfolio = pf,
-			});
-			position.LocalTime = position.LastChangeTime = CurrentTime;
-			position.CurrentValue = value;
-			return position;
-		}
-
-		private readonly Dictionary<Tuple<Security, Portfolio>, Position> _positions = new Dictionary<Tuple<Security, Portfolio>, Position>();
-
-		IEnumerable<Position> IPositionProvider.Positions => _positions.Values.ToArray();
-
-		private Action<Position> _newPosition;
-
-		event Action<Position> IPositionProvider.NewPosition
-		{
-			add => _newPosition += value;
-			remove => _newPosition -= value;
-		}
-
-		private Action<Position> _positionChanged;
-
-		event Action<Position> IPositionProvider.PositionChanged
-		{
-			add => _positionChanged += value;
-			remove => _positionChanged -= value;
-		}
-
-		Position IPositionProvider.GetPosition(Portfolio portfolio, Security security, string clientCode, string depoName, TPlusLimits? limitType)
-		{
-			return _positions.TryGetValue(Tuple.Create(security, portfolio));
-		}
-
-		Portfolio IPortfolioProvider.LookupByPortfolioName(string name)
-		{
-			return SafeGetConnector().LookupByPortfolioName(name);
-		}
-
-		IEnumerable<Portfolio> IPortfolioProvider.Portfolios => Portfolio == null ? Enumerable.Empty<Portfolio>() : new[] { Portfolio };
-
-		private Action<Portfolio> _newPortfolio;
-
-		event Action<Portfolio> IPortfolioProvider.NewPortfolio
-		{
-			add => _newPortfolio += value;
-			remove => _newPortfolio -= value;
-		}
-
-		private Action<Portfolio> _portfolioChanged;
-
-		event Action<Portfolio> IPortfolioProvider.PortfolioChanged
-		{
-			add => _portfolioChanged += value;
-			remove => _portfolioChanged -= value;
-		}
-
 		IdGenerator ITransactionProvider.TransactionIdGenerator => SafeGetConnector().TransactionIdGenerator;
 
 		private Action<Order> _newOrder;
@@ -82,6 +18,22 @@ namespace StockSharp.Algo.Strategies
 		{
 			add => _newOrder += value;
 			remove => _newOrder -= value;
+		}
+
+		private Action<long, Order> _orderEdited;
+
+		event Action<long, Order> ITransactionProvider.OrderEdited
+		{
+			add => _orderEdited += value;
+			remove => _orderEdited -= value;
+		}
+
+		private Action<long, OrderFail> _orderEditFailed;
+
+		event Action<long, OrderFail> ITransactionProvider.OrderEditFailed
+		{
+			add => _orderEditFailed += value;
+			remove => _orderEditFailed -= value;
 		}
 
 		private Action<long> _massOrderCanceled;
@@ -152,40 +104,6 @@ namespace StockSharp.Algo.Strategies
 		{
 			add => _lookupPortfoliosResult2 += value;
 			remove => _lookupPortfoliosResult2 -= value;
-		}
-
-		void ITransactionProvider.LookupPortfolios(PortfolioLookupMessage criteria)
-		{
-#pragma warning disable 618
-			SafeGetConnector().LookupPortfolios(criteria);
-#pragma warning restore 618
-		}
-
-		void ITransactionProvider.LookupOrders(OrderStatusMessage criteria)
-		{
-#pragma warning disable 618
-			SafeGetConnector().LookupOrders(criteria);
-#pragma warning restore 618
-		}
-
-		void ITransactionProvider.SubscribePositions(PortfolioLookupMessage criteria)
-		{
-			SafeGetConnector().SubscribePositions(criteria);
-		}
-
-		void ITransactionProvider.SubscribeOrders(OrderStatusMessage criteria)
-		{
-			SafeGetConnector().SubscribeOrders(criteria);
-		}
-
-		void ITransactionProvider.SubscribeOrders(Security security, DateTimeOffset? from, DateTimeOffset? to, long? count, IMessageAdapter adapter)
-		{
-			SafeGetConnector().SubscribeOrders(security, from, to, count, adapter);
-		}
-
-		void ITransactionProvider.UnSubscribeOrders(long originalTransactionId)
-		{
-			SafeGetConnector().UnSubscribeOrders(originalTransactionId);
 		}
 
 		void ITransactionProvider.CancelOrders(bool? isStopOrder, Portfolio portfolio, Sides? direction, ExchangeBoard board, Security security, SecurityTypes? securityType, long? transactionId)

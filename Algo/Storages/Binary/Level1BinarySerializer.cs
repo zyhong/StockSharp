@@ -548,7 +548,7 @@ namespace StockSharp.Algo.Storages.Binary
 		};
 
 		public Level1BinarySerializer(SecurityId securityId, IExchangeInfoProvider exchangeInfoProvider)
-			: base(securityId, null, 50, MarketDataVersions.Version61, exchangeInfoProvider)
+			: base(securityId, null, 50, MarketDataVersions.Version62, exchangeInfoProvider)
 		{
 		}
 
@@ -599,6 +599,7 @@ namespace StockSharp.Algo.Storages.Binary
 			var minMaxPrice = metaInfo.Version >= MarketDataVersions.Version60;
 			var useLong = metaInfo.Version >= MarketDataVersions.Version60;
 			var storeSteps = metaInfo.Version >= MarketDataVersions.Version60;
+			var buildFrom = metaInfo.Version >= MarketDataVersions.Version62;
 
 			foreach (var message in messages)
 			{
@@ -625,6 +626,9 @@ namespace StockSharp.Algo.Storages.Binary
 						throw new ArgumentException(LocalizedStrings.Str920, nameof(messages));
 
 					writer.WriteInt(count);
+
+					if (buildFrom)
+						writer.WriteBuildFrom(message.BuildFrom);
 				}
 
 				foreach (var change in message.Changes)
@@ -1114,6 +1118,11 @@ namespace StockSharp.Algo.Storages.Binary
 						case Level1Fields.VWAPPrev:
 						case Level1Fields.YieldVWAP:
 						case Level1Fields.YieldVWAPPrev:
+						case Level1Fields.Index:
+						case Level1Fields.Imbalance:
+						case Level1Fields.UnderlyingPrice:
+						case Level1Fields.OptionMargin:
+						case Level1Fields.OptionSyntheticMargin:
 						{
 							writer.WriteDecimal((decimal)value, 0);
 							break;
@@ -1156,6 +1165,7 @@ namespace StockSharp.Algo.Storages.Binary
 			var minMaxPrice = metaInfo.Version >= MarketDataVersions.Version60;
 			var useLong = metaInfo.Version >= MarketDataVersions.Version60;
 			var storeSteps = metaInfo.Version >= MarketDataVersions.Version60;
+			var buildFrom = metaInfo.Version >= MarketDataVersions.Version62;
 
 			var l1Msg = new Level1ChangeMessage { SecurityId = SecurityId };
 
@@ -1181,6 +1191,9 @@ namespace StockSharp.Algo.Storages.Binary
 				//	l1Msg.LocalTime = l1Msg.ServerTime;
 
 				changeCount = reader.ReadInt();
+
+				if (buildFrom)
+					l1Msg.BuildFrom = reader.ReadBuildFrom();
 			}
 			else
 			{

@@ -30,7 +30,14 @@ namespace StockSharp.Algo
 	using StockSharp.Messages;
 	using StockSharp.Localization;
 
-	class EntityCache
+	enum OrderOperations
+	{
+		Register,
+		Cancel,
+		Edit,
+	}
+
+	class EntityCache : ISnapshotHolder
 	{
 		private static readonly MemoryStatisticsValue<Trade> _tradeStat = new MemoryStatisticsValue<Trade>(LocalizedStrings.Ticks);
 
@@ -38,16 +45,20 @@ namespace StockSharp.Algo
 		{
 			private OrderChangeInfo() { }
 
-			public OrderChangeInfo(Order order, bool isNew, bool isChanged)
+			public OrderChangeInfo(Order order, bool isNew, bool isChanged, bool isEdit)
 			{
 				Order = order ?? throw new ArgumentNullException(nameof(order));
+
 				IsNew = isNew;
 				IsChanged = isChanged;
+				IsEdit = isEdit;
 			}
 
-			public Order Order { get; private set; }
-			public bool IsNew { get; private set; }
-			public bool IsChanged { get; private set; }
+			public Order Order { get; }
+
+			public bool IsNew { get; }
+			public bool IsChanged { get; }
+			public bool IsEdit { get; }
 
 			public static readonly OrderChangeInfo NotExist = new OrderChangeInfo();
 		}
@@ -66,7 +77,7 @@ namespace StockSharp.Algo
 
 			public Order Order { get; }
 
-			public IEnumerable<OrderChangeInfo> ApplyChanges(ExecutionMessage message, bool isCancel, Action<Order> process)
+			public IEnumerable<OrderChangeInfo> ApplyChanges(ExecutionMessage message, OrderOperations operation, Action<Order> process)
 			{
 				if (process is null)
 					throw new ArgumentNullException(nameof(process));
@@ -78,7 +89,7 @@ namespace StockSharp.Algo
 				if (order.State == OrderStates.Done)
 				{
 					// данные о заявке могут приходить из маркет-дата и транзакционного адаптеров
-					retVal = new OrderChangeInfo(order, _raiseNewOrder, false);
+					retVal = new OrderChangeInfo(order, _raiseNewOrder, false, false);
 					_raiseNewOrder = false;
 					process(order);
 					yield return retVal;
@@ -102,7 +113,7 @@ namespace StockSharp.Algo
 					clone.OrderState = OrderStates.Active;
 					clone.Balance = null;
 
-					foreach (var i in ApplyChanges(clone, false, process))
+					foreach (var i in ApplyChanges(clone, operation, process))
 						yield return i;
 				}
 
@@ -130,39 +141,59 @@ namespace StockSharp.Algo
 				order.LastChangeTime = _raiseNewOrder ? message.ServerTime : message.LocalTime;
 				order.LocalTime = message.LocalTime;
 
-				//нулевой объем может быть при перерегистрации
-				if (order.Volume == 0 && message.OrderVolume != null)
+				if (message.OrderPrice != 0)
+					order.Price = message.OrderPrice;
+
+				if (message.OrderVolume != null)
 					order.Volume = message.OrderVolume.Value;
 
-				if (message.Commission != null)
+				if (message.Commission != default)
 					order.Commission = message.Commission;
 
 				if (!message.CommissionCurrency.IsEmpty())
 					order.CommissionCurrency = message.CommissionCurrency;
 
-				if (message.TimeInForce != null)
+				if (message.TimeInForce != default)
 					order.TimeInForce = message.TimeInForce.Value;
 
-				if (message.Latency != null)
+				if (message.Latency != default)
 				{
-					if (isCancel)
-						order.LatencyCancellation = message.Latency.Value;
-					else if (isPending)
+					switch (operation)
 					{
-						if (order.State != OrderStates.Pending)
-							order.LatencyRegistration = message.Latency.Value;
+						case OrderOperations.Register:
+						{
+							if (isPending && order.State != OrderStates.Pending)
+								order.LatencyRegistration = message.Latency.Value;
+
+							break;
+						}
+						case OrderOperations.Cancel:
+						{
+							order.LatencyCancellation = message.Latency.Value;
+							break;
+						}
+						case OrderOperations.Edit:
+						{
+							order.LatencyEdition = message.Latency.Value;
+							break;
+						}
+						default:
+							throw new ArgumentOutOfRangeException(operation.ToString());
 					}
 				}
 
-				if (message.AveragePrice != null)
+				if (message.AveragePrice != default)
 					order.AveragePrice = message.AveragePrice;
 
-				if (message.Yield != null)
+				if (message.Yield != default)
 					order.Yield = message.Yield;
+
+				if (message.SeqNum != default)
+					order.SeqNum = message.SeqNum;
 
 				message.CopyExtensionInfo(order);
 
-				retVal = new OrderChangeInfo(order, _raiseNewOrder, true);
+				retVal = new OrderChangeInfo(order, _raiseNewOrder, true, operation == OrderOperations.Edit);
 				_raiseNewOrder = false;
 				process(order);
 				yield return retVal;
@@ -172,12 +203,12 @@ namespace StockSharp.Algo
 		private class SecurityData
 		{
 			public readonly CachedSynchronizedDictionary<Tuple<long, long, string>, MyTrade> MyTrades = new CachedSynchronizedDictionary<Tuple<long, long, string>, MyTrade>();
-			public readonly CachedSynchronizedDictionary<Tuple<long, bool, bool>, OrderInfo> Orders = new CachedSynchronizedDictionary<Tuple<long, bool, bool>, OrderInfo>();
+			public readonly CachedSynchronizedDictionary<Tuple<long, bool, OrderOperations>, OrderInfo> Orders = new CachedSynchronizedDictionary<Tuple<long, bool, OrderOperations>, OrderInfo>();
 
-			public OrderInfo TryGetOrder(OrderTypes? type, long transactionId, bool isCancel)
+			public OrderInfo TryGetOrder(OrderTypes? type, long transactionId, OrderOperations operation)
 			{
-				return Orders.TryGetValue(CreateOrderKey(type, transactionId, isCancel))
-					?? (type == null ? Orders.TryGetValue(CreateOrderKey(OrderTypes.Conditional, transactionId, isCancel)) : null);
+				return Orders.TryGetValue(CreateOrderKey(type, transactionId, operation))
+					?? (type == null ? Orders.TryGetValue(CreateOrderKey(OrderTypes.Conditional, transactionId, operation)) : null);
 			}
 
 			public readonly SynchronizedDictionary<long, Trade> TradesById = new SynchronizedDictionary<long, Trade>();
@@ -198,22 +229,45 @@ namespace StockSharp.Algo
 		public IEnumerable<Trade> Trades
 			=> _securityData.SyncGet(d => d.SelectMany(p => p.Value.Trades.SyncGet(t => t.ToArray()).Concat(p.Value.TradesById.SyncGet(t => t.Values.ToArray())).Concat(p.Value.TradesByStringId.SyncGet(t => t.Values.ToArray()))).ToArray());
 
-		private readonly SynchronizedDictionary<Tuple<long, bool>, Order> _allOrdersByTransactionId = new SynchronizedDictionary<Tuple<long, bool>, Order>();
-		private readonly SynchronizedDictionary<Tuple<long, bool>, OrderFail> _allOrdersByFailedId = new SynchronizedDictionary<Tuple<long, bool>, OrderFail>();
+		private readonly SynchronizedDictionary<Tuple<long, OrderOperations>, Order> _allOrdersByTransactionId = new SynchronizedDictionary<Tuple<long, OrderOperations>, Order>();
+		private readonly SynchronizedDictionary<Tuple<long, OrderOperations>, OrderFail> _allOrdersByFailedId = new SynchronizedDictionary<Tuple<long, OrderOperations>, OrderFail>();
 		private readonly SynchronizedDictionary<long, Order> _allOrdersById = new SynchronizedDictionary<long, Order>();
 		private readonly SynchronizedDictionary<string, Order> _allOrdersByStringId = new SynchronizedDictionary<string, Order>(StringComparer.InvariantCultureIgnoreCase);
 
 		private readonly SynchronizedDictionary<string, News> _newsById = new SynchronizedDictionary<string, News>(StringComparer.InvariantCultureIgnoreCase);
 		private readonly SynchronizedList<News> _newsWithoutId = new SynchronizedList<News>();
 
-		private class MarketDepthInfo : RefTriple<MarketDepth, QuoteChange[], QuoteChange[]>
+		private class MarketDepthInfo
 		{
+			private QuoteChangeMessage _snapshot;
+			private bool _hasChanges;
+
 			public MarketDepthInfo(MarketDepth depth)
-				: base(depth, null, null)
 			{
+				Depth = depth ?? throw new ArgumentNullException(nameof(depth));
 			}
 
-			public bool HasChanges => Second != null;
+			public readonly MarketDepth Depth;
+
+			public void TryFlushChanges()
+			{
+				if (_hasChanges == false)
+					return;
+
+				_hasChanges = false;
+				_snapshot.ToMarketDepth(Depth);
+			}
+
+			public void UpdateSnapshot(QuoteChangeMessage snapshot)
+			{
+				if (snapshot is null)
+					throw new ArgumentNullException(nameof(snapshot));
+
+				_snapshot = snapshot;
+				_hasChanges = true;
+			}
+
+			public QuoteChangeMessage GetCopy() => _snapshot?.TypedClone();
 		}
 
 		private readonly SynchronizedDictionary<Tuple<Security, bool>, MarketDepthInfo> _marketDepths = new SynchronizedDictionary<Tuple<Security, bool>, MarketDepthInfo>();
@@ -273,7 +327,7 @@ namespace StockSharp.Algo
 				throw new ArgumentNullException(nameof(order));
 
 			if (OrdersKeepCount > 0)
-				_orders.Add(order);
+				_orders.Add(order, null);
 
 			RecycleOrders();
 		}
@@ -285,9 +339,9 @@ namespace StockSharp.Algo
 		
 		public IExchangeInfoProvider ExchangeInfoProvider { get; }
 
-		private readonly CachedSynchronizedList<Order> _orders = new CachedSynchronizedList<Order>();
+		private readonly CachedSynchronizedDictionary<Order, IMessageAdapter> _orders = new CachedSynchronizedDictionary<Order, IMessageAdapter>();
 
-		public IEnumerable<Order> Orders => _orders.Cache;
+		public IEnumerable<Order> Orders => _orders.CachedKeys;
 
 		private readonly CachedSynchronizedList<MyTrade> _myTrades = new CachedSynchronizedList<MyTrade>();
 
@@ -301,13 +355,21 @@ namespace StockSharp.Algo
 
 		public IEnumerable<OrderFail> OrderCancelFails => _orderCancelFails.SyncGet(c => c.ToArray());
 
-		private readonly ILogReceiver _logReceiver;
+		private readonly SynchronizedList<OrderFail> _orderEditFails = new SynchronizedList<OrderFail>();
 
-		public EntityCache(ILogReceiver logReceiver, IEntityFactory entityFactory, IExchangeInfoProvider exchangeInfoProvider)
+		public IEnumerable<OrderFail> OrderEditFails => _orderEditFails.SyncGet(c => c.ToArray());
+
+		private readonly ILogReceiver _logReceiver;
+		private readonly Func<SecurityId?, Security> _tryGetSecurity;
+		private readonly IPositionProvider _positionProvider;
+
+		public EntityCache(ILogReceiver logReceiver, Func<SecurityId?, Security> tryGetSecurity, IEntityFactory entityFactory, IExchangeInfoProvider exchangeInfoProvider, IPositionProvider positionProvider)
 		{
 			_logReceiver = logReceiver ?? throw new ArgumentNullException(nameof(logReceiver));
+			_tryGetSecurity = tryGetSecurity ?? throw new ArgumentNullException(nameof(tryGetSecurity));
 			EntityFactory = entityFactory ?? throw new ArgumentNullException(nameof(entityFactory));
 			ExchangeInfoProvider = exchangeInfoProvider ?? throw new ArgumentNullException(nameof(exchangeInfoProvider));
+			_positionProvider = positionProvider ?? throw new ArgumentNullException(nameof(positionProvider));
 		}
 
 		public void Clear()
@@ -333,6 +395,7 @@ namespace StockSharp.Algo
 
 			_orderCancelFails.Clear();
 			_orderRegisterFails.Clear();
+			_orderEditFails.Clear();
 
 			_marketDepths.Clear();
 
@@ -371,27 +434,32 @@ namespace StockSharp.Algo
 
 		public void AddOrderByCancelationId(Order order, long transactionId)
 		{
-			AddOrderByTransactionId(order, transactionId, true);
+			AddOrderByTransactionId(order, transactionId, OrderOperations.Cancel);
 		}
 
 		public void AddOrderByRegistrationId(Order order)
 		{
 			AddOrder(order);
-			AddOrderByTransactionId(order, order.TransactionId, false);
+			AddOrderByTransactionId(order, order.TransactionId, OrderOperations.Register);
 		}
 
-		public void AddOrderFailById(OrderFail fail, bool isCancel, long transactionId)
+		public void AddOrderByEditionId(Order order, long transactionId)
 		{
-			_allOrdersByFailedId.TryAdd(Tuple.Create(transactionId, isCancel), fail);
+			AddOrderByTransactionId(order, transactionId, OrderOperations.Edit);
 		}
 
-		private void AddOrderByTransactionId(Order order, long transactionId, bool isCancel)
+		public void AddOrderFailById(OrderFail fail, OrderOperations operation, long transactionId)
+		{
+			_allOrdersByFailedId.TryAdd(Tuple.Create(transactionId, operation), fail);
+		}
+
+		private void AddOrderByTransactionId(Order order, long transactionId, OrderOperations operation)
 		{
 			if (order == null)
 				throw new ArgumentNullException(nameof(order));
 
-			GetData(order.Security).Orders.Add(CreateOrderKey(order.Type, transactionId, isCancel), new OrderInfo(this, order, !isCancel));
-			_allOrdersByTransactionId.Add(Tuple.Create(transactionId, isCancel), order);
+			GetData(order.Security).Orders.Add(CreateOrderKey(order.Type, transactionId, operation), new OrderInfo(this, order, operation == OrderOperations.Register));
+			_allOrdersByTransactionId.Add(Tuple.Create(transactionId, operation), order);
 		}
 
 		private void UpdateOrderIds(Order order, SecurityData securityData)
@@ -409,6 +477,25 @@ namespace StockSharp.Algo
 				securityData.OrdersByStringId[order.StringId] = order;
 				_allOrdersByStringId[order.StringId] = order;
 			}
+		}
+
+		public IMessageAdapter TryGetAdapter(Order order)
+		{
+			if (order is null)
+				throw new ArgumentNullException(nameof(order));
+
+			return _orders.TryGetValue(order);
+		}
+
+		public void TrySetAdapter(Order order, IMessageAdapter adapter)
+		{
+			if (order is null)
+				throw new ArgumentNullException(nameof(order));
+
+			if (adapter is null || adapter is BasketMessageAdapter)
+				return;
+
+			_orders[order] = adapter;
 		}
 
 		public IEnumerable<OrderChangeInfo> ProcessOrderMessage(Order order, Security security, ExecutionMessage message, long transactionId, Func<string, Portfolio> getPortfolio)
@@ -450,14 +537,15 @@ namespace StockSharp.Algo
 				}
 				else
 				{
-					foreach (var i in info.ApplyChanges(message, false, o => UpdateOrderIds(o, securityData)))
+					foreach (var i in info.ApplyChanges(message, OrderOperations.Register, o => UpdateOrderIds(o, securityData)))
 						yield return i;
 				}
 			}
 			else
 			{
-				var cancelledInfo = securityData.TryGetOrder(message.OrderType, transactionId, true);
-				var registeredInfo = securityData.TryGetOrder(message.OrderType, transactionId, false);
+				var cancelledInfo = securityData.TryGetOrder(message.OrderType, transactionId, OrderOperations.Cancel);
+				var registeredInfo = securityData.TryGetOrder(message.OrderType, transactionId, OrderOperations.Register);
+				var editedInfo = securityData.TryGetOrder(message.OrderType, transactionId, OrderOperations.Edit);
 
 				// проверяем не отмененная ли заявка пришла
 				if (cancelledInfo != null) // && (cancelledOrder.Id == orderId || (!cancelledOrder.StringId.IsEmpty() && cancelledOrder.StringId.CompareIgnoreCase(orderStringId))))
@@ -468,7 +556,7 @@ namespace StockSharp.Algo
 					{
 						_logReceiver.AddDebugLog("Сancel '{0}': {1}", cancellationOrder.TransactionId, message);
 						
-						foreach (var i in cancelledInfo.ApplyChanges(message, true, o => UpdateOrderIds(o, securityData)))
+						foreach (var i in cancelledInfo.ApplyChanges(message, OrderOperations.Cancel, o => UpdateOrderIds(o, securityData)))
 							yield return i;
 
 						yield break;
@@ -485,7 +573,7 @@ namespace StockSharp.Algo
 						if (message.Latency != null)
 							cancellationOrder.LatencyCancellation = message.Latency.Value;
 
-						yield return new OrderChangeInfo(cancellationOrder, false, true);
+						yield return new OrderChangeInfo(cancellationOrder, false, true, false);
 
 						//var isCancelOrderOnly = (message.OrderId != null && message.OrderId == cancellationOrder.Id)
 						//	|| (message.OrderStringId != null && message.OrderStringId == cancellationOrder.StringId)
@@ -500,7 +588,20 @@ namespace StockSharp.Algo
 
 					_logReceiver.AddDebugLog("Replace-reg '{0}': {1}", registeredInfo.Order.TransactionId, message);
 
-					foreach (var i in registeredInfo.ApplyChanges(message, false, o => UpdateOrderIds(o, securityData)))
+					foreach (var i in registeredInfo.ApplyChanges(message, OrderOperations.Register, o => UpdateOrderIds(o, securityData)))
+						yield return i;
+
+					yield break;
+				}
+
+				if (editedInfo != null)
+				{
+					_logReceiver.AddDebugLog("Edit '{0}': {1}", editedInfo.Order.TransactionId, message);
+
+					if (message.Latency != null)
+						editedInfo.Order.LatencyEdition = message.Latency.Value;
+
+					foreach (var i in editedInfo.ApplyChanges(message, OrderOperations.Edit, o => UpdateOrderIds(o, securityData)))
 						yield return i;
 
 					yield break;
@@ -522,6 +623,7 @@ namespace StockSharp.Algo
 					o.ExpiryDate = message.ExpiryDate;
 					o.Condition = message.Condition;
 					o.UserOrderId = message.UserOrderId;
+					o.StrategyId = message.StrategyId;
 					o.ClientCode = message.ClientCode;
 					o.BrokerCode = message.BrokerCode;
 					o.IsMarketMaker = message.IsMarketMaker;
@@ -531,6 +633,7 @@ namespace StockSharp.Algo
 					o.MinVolume = message.MinVolume;
 					o.PositionEffect = message.PositionEffect;
 					o.PostOnly = message.PostOnly;
+					o.SeqNum = message.SeqNum;
 
 					if (message.Balance != null)
 					{
@@ -546,20 +649,18 @@ namespace StockSharp.Algo
 					//	o.ExtensionInfo = new Dictionary<string, object>();
 
 					AddOrder(o);
-					_allOrdersByTransactionId.Add(Tuple.Create(transactionId, false), o);
+					_allOrdersByTransactionId.Add(Tuple.Create(transactionId, OrderOperations.Register), o);
 
 					registeredInfo = new OrderInfo(this, o, true);
-					securityData.Orders.Add(CreateOrderKey(o.Type, transactionId, false), registeredInfo);
+					securityData.Orders.Add(CreateOrderKey(o.Type, transactionId, OrderOperations.Register), registeredInfo);
 				}
 
-				foreach (var i in registeredInfo.ApplyChanges(message, false, o => UpdateOrderIds(o, securityData)))
-				{
+				foreach (var i in registeredInfo.ApplyChanges(message, OrderOperations.Register, o => UpdateOrderIds(o, securityData)))
 					yield return i;
-				}
 			}
 		}
 
-		public IEnumerable<Tuple<OrderFail, bool>> ProcessOrderFailMessage(Order order, Security security, ExecutionMessage message)
+		public IEnumerable<Tuple<OrderFail, OrderOperations>> ProcessOrderFailMessage(Order order, Security security, ExecutionMessage message)
 		{
 			if (security == null)
 				throw new ArgumentNullException(nameof(security));
@@ -569,7 +670,7 @@ namespace StockSharp.Algo
 
 			var data = GetData(security);
 
-			var orders = new List<Tuple<Order, bool>>();
+			var orders = new List<Tuple<Order, OrderOperations>>();
 
 			if (message.OriginalTransactionId == 0)
 				throw new ArgumentOutOfRangeException(nameof(message), message.OriginalTransactionId, LocalizedStrings.Str715);
@@ -578,20 +679,25 @@ namespace StockSharp.Algo
 
 			if (order == null)
 			{
-				var cancelledOrder = data.TryGetOrder(orderType, message.OriginalTransactionId, true)?.Order;
+				var cancelledOrder = data.TryGetOrder(orderType, message.OriginalTransactionId, OrderOperations.Cancel)?.Order;
 
 				if (cancelledOrder != null && orderType == null)
 					orderType = cancelledOrder.Type;
 
 				if (cancelledOrder != null /*&& order.Id == message.OrderId*/)
-					orders.Add(Tuple.Create(cancelledOrder, true));
+					orders.Add(Tuple.Create(cancelledOrder, OrderOperations.Cancel));
 
-				var registeredOrder = data.TryGetOrder(orderType, message.OriginalTransactionId, false)?.Order;
+				var registeredOrder = data.TryGetOrder(orderType, message.OriginalTransactionId, OrderOperations.Register)?.Order;
 
 				if (registeredOrder != null)
-					orders.Add(Tuple.Create(registeredOrder, false));
+					orders.Add(Tuple.Create(registeredOrder, OrderOperations.Register));
 
-				if (cancelledOrder == null && registeredOrder == null)
+				var editedOrder = data.TryGetOrder(orderType, message.OriginalTransactionId, OrderOperations.Edit)?.Order;
+
+				if (editedOrder != null)
+					orders.Add(Tuple.Create(editedOrder, OrderOperations.Edit));
+
+				if (cancelledOrder == null && registeredOrder == null && editedOrder == null)
 				{
 					if (!message.OrderStringId.IsEmpty())
 					{
@@ -609,34 +715,40 @@ namespace StockSharp.Algo
 			}
 			else
 			{
-				if (data.TryGetOrder(order.Type, message.OriginalTransactionId, true) != null)
-					orders.Add(Tuple.Create(order, true));
+				void TryAdd(OrderOperations operation)
+				{
+					var foundOrder = data.TryGetOrder(order.Type, message.OriginalTransactionId, operation)?.Order;
+					if (foundOrder != null)
+						orders.Add(Tuple.Create(foundOrder, operation));
+				}
 
-				var registeredOrder = data.TryGetOrder(order.Type, message.OriginalTransactionId, false)?.Order;
-				if (registeredOrder != null)
-					orders.Add(Tuple.Create(registeredOrder, false));
+				TryAdd(OrderOperations.Cancel);
+				TryAdd(OrderOperations.Register);
+				TryAdd(OrderOperations.Edit);
 			}
 
 			if (orders.Count == 0)
 			{
-				var fails = new List<Tuple<OrderFail, bool>>();
+				var fails = new List<Tuple<OrderFail, OrderOperations>>();
 
-				lock (_allOrdersByFailedId.SyncRoot)
+				Order TryAddFail(OrderOperations operation)
 				{
-					if (_allOrdersByFailedId.TryGetAndRemove(Tuple.Create(message.OriginalTransactionId, true), out var cancelFail))
-						fails.Add(Tuple.Create(cancelFail, true));
-				}
-
-				Order regOrder = null;
-
-				lock (_allOrdersByFailedId.SyncRoot)
-				{
-					if (_allOrdersByFailedId.TryGetAndRemove(Tuple.Create(message.OriginalTransactionId, false), out var regFail))
+					lock (_allOrdersByFailedId.SyncRoot)
 					{
-						regOrder = regFail.Order;
-						fails.Add(Tuple.Create(regFail, false));
+						if (_allOrdersByFailedId.TryGetAndRemove(Tuple.Create(message.OriginalTransactionId, operation), out var fail))
+						{
+							fails.Add(Tuple.Create(fail, operation));
+							return fail.Order;
+						}
 					}
+
+					return null;
 				}
+
+				TryAddFail(OrderOperations.Edit);
+				TryAddFail(OrderOperations.Cancel);
+
+				var regOrder = TryAddFail(OrderOperations.Register);
 
 				if (regOrder != null && regOrder.State == OrderStates.None)
 				{
@@ -645,14 +757,14 @@ namespace StockSharp.Algo
 					regOrder.LastChangeTime = message.ServerTime;
 					regOrder.LocalTime = message.LocalTime;
 				}
-				
+
 				return fails;
 			}
 
 			return orders.Select(t =>
 			{
 				var o = t.Item1;
-				var isCancelTransaction = t.Item2;
+				var operation = t.Item2;
 
 				o.LastChangeTime = message.ServerTime;
 				o.LocalTime = message.LocalTime;
@@ -661,7 +773,7 @@ namespace StockSharp.Algo
 					o.Status = message.OrderStatus;
 
 				//для ошибок снятия не надо менять состояние заявки
-				if (!isCancelTransaction)
+				if (operation == OrderOperations.Register)
 					o.ApplyNewState(OrderStates.Failed, _logReceiver);
 
 				if (message.Commission != null)
@@ -672,12 +784,12 @@ namespace StockSharp.Algo
 
 				message.CopyExtensionInfo(o);
 
-				var error = message.Error ?? new InvalidOperationException(isCancelTransaction ? LocalizedStrings.Str716 : LocalizedStrings.Str717);
+				var error = message.Error ?? new InvalidOperationException(operation == OrderOperations.Cancel ? LocalizedStrings.Str716 : LocalizedStrings.Str717);
 
 				var fail = EntityFactory.CreateOrderFail(o, error);
 				fail.ServerTime = message.ServerTime;
 				fail.LocalTime = message.LocalTime;
-				return Tuple.Create(fail, isCancelTransaction);
+				return Tuple.Create(fail, operation);
 			});
 		}
 
@@ -694,14 +806,14 @@ namespace StockSharp.Algo
 			if (transactionId == 0 && message.OrderId == null && message.OrderStringId.IsEmpty())
 				throw new ArgumentOutOfRangeException(nameof(message), transactionId, LocalizedStrings.Str715);
 
-			var myTrade = securityData.MyTrades.TryGetValue(Tuple.Create(transactionId, message.TradeId ?? 0, message.TradeStringId));
+			var tradeKey = Tuple.Create(transactionId, message.TradeId ?? 0, message.TradeStringId ?? string.Empty);
 
-			if (myTrade != null)
+			if (securityData.MyTrades.TryGetValue(tradeKey, out var myTrade))
 				return Tuple.Create(myTrade, false);
 
 			if (order == null)
 			{
-				order = GetOrder(security, transactionId, message.OrderId, message.OrderStringId);
+				order = GetOrder(security, transactionId, message.OrderId, message.OrderStringId, OrderTypes.Limit, OrderOperations.Register);
 
 				if (order == null)
 					return null;
@@ -709,7 +821,7 @@ namespace StockSharp.Algo
 
 			var isNew = false;
 
-			myTrade = securityData.MyTrades.SafeAdd(Tuple.Create(order.TransactionId, message.TradeId ?? 0, message.TradeStringId), key =>
+			myTrade = securityData.MyTrades.SafeAdd(tradeKey, key =>
 			{
 				isNew = true;
 
@@ -759,7 +871,7 @@ namespace StockSharp.Algo
 			if (message == null)
 				throw new ArgumentNullException(nameof(message));
 
-			var trade = GetTrade(security, message.TradeId, message.TradeStringId, (id, stringId) =>
+			var trade = GetTrade(security, message.TradeId, message.TradeStringId ?? string.Empty, (id, stringId) =>
 			{
 				var t = message.ToTrade(EntityFactory.CreateTrade(security, id, stringId));
 				t.LocalTime = message.LocalTime;
@@ -836,15 +948,15 @@ namespace StockSharp.Algo
 			return Tuple.Create(news, isNew);
 		}
 
-		private static Tuple<long, bool, bool> CreateOrderKey(OrderTypes? type, long transactionId, bool isCancel)
+		private static Tuple<long, bool, OrderOperations> CreateOrderKey(OrderTypes? type, long transactionId, OrderOperations operation)
 		{
 			if (transactionId <= 0)
 				throw new ArgumentOutOfRangeException(nameof(transactionId), transactionId, LocalizedStrings.Str718);
 
-			return Tuple.Create(transactionId, type == OrderTypes.Conditional, isCancel);
+			return Tuple.Create(transactionId, type == OrderTypes.Conditional, operation);
 		}
 
-		public Order GetOrder(Security security, long transactionId, long? orderId, string orderStringId, OrderTypes orderType = OrderTypes.Limit, bool isCancel = false)
+		private Order GetOrder(Security security, long transactionId, long? orderId, string orderStringId, OrderTypes orderType, OrderOperations operation)
 		{
 			if (security == null)
 				throw new ArgumentNullException(nameof(security));
@@ -857,7 +969,7 @@ namespace StockSharp.Algo
 			Order order = null;
 
 			if (transactionId != 0)
-				order = data.TryGetOrder(orderType, transactionId, isCancel)?.Order;
+				order = data.TryGetOrder(orderType, transactionId, operation)?.Order;
 
 			if (order != null)
 				return order;
@@ -868,7 +980,7 @@ namespace StockSharp.Algo
 			if (order != null)
 				return order;
 
-			return orderStringId == null ? null : data.OrdersByStringId.TryGetValue(orderStringId);
+			return orderStringId.IsEmpty() ? null : data.OrdersByStringId.TryGetValue(orderStringId);
 		}
 
 		public long GetTransactionId(long originalTransactionId)
@@ -890,7 +1002,7 @@ namespace StockSharp.Algo
 				//return null;
 			}
 
-			return _allOrdersByTransactionId.TryGetValue(Tuple.Create(transactionId, true)) ?? _allOrdersByTransactionId.TryGetValue(Tuple.Create(transactionId, false));
+			return _allOrdersByTransactionId.TryGetValue(Tuple.Create(transactionId, OrderOperations.Cancel)) ?? _allOrdersByTransactionId.TryGetValue(Tuple.Create(transactionId, OrderOperations.Register));
 		}
 
 		public Tuple<Trade, bool> GetTrade(Security security, long? id, string strId, Func<long?, string, Trade> createTrade)
@@ -949,14 +1061,22 @@ namespace StockSharp.Algo
 			return Tuple.Create(trade, isNew);
 		}
 
-		public void AddRegisterFail(OrderFail fail)
+		public void AddFail(OrderOperations operation, OrderFail fail)
 		{
-			_orderRegisterFails.Add(fail);
-		}
-
-		public void AddCancelFail(OrderFail fail)
-		{
-			_orderCancelFails.Add(fail);
+			switch (operation)
+			{
+				case OrderOperations.Register:
+					_orderRegisterFails.Add(fail);
+					break;
+				case OrderOperations.Cancel:
+					_orderCancelFails.Add(fail);
+					break;
+				case OrderOperations.Edit:
+					_orderEditFails.Add(fail);
+					break;
+				default:
+					throw new ArgumentOutOfRangeException(operation.ToString());
+			}
 		}
 
 		private void RecycleTrades()
@@ -1042,8 +1162,11 @@ namespace StockSharp.Algo
 			{
 				var toRemove = _orders.SyncGet(d =>
 				{
-					var tmp = d.Where(o => o.State.IsFinal()).Take(countToRemove).ToHashSet();
-					d.RemoveRange(tmp);
+					var tmp = d.Where(o => o.Key.State.IsFinal()).Take(countToRemove).Select(p => p.Key).ToHashSet();
+
+					foreach (var order in tmp)
+						d.Remove(order);
+
 					return tmp;
 				});
 
@@ -1062,24 +1185,27 @@ namespace StockSharp.Algo
 			}
 		}
 
-		public MarketDepth GetMarketDepth(Security security, bool isFiltered, Func<SecurityId, Security> getSecurity, out bool isNew)
+		public MarketDepth GetMarketDepth(Security security, QuoteChangeMessage message, out bool isNew)
 		{
-			if (security == null)
+			if (security is null)
 				throw new ArgumentNullException(nameof(security));
+
+			if (message is null)
+				throw new ArgumentNullException(nameof(message));
 
 			isNew = false;
 
-			MarketDepthInfo info;
-
 			lock (_marketDepths.SyncRoot)
 			{
-				var key = Tuple.Create(security, isFiltered);
+				var key = Tuple.Create(security, message.IsFiltered);
 
-				if (!_marketDepths.TryGetValue(key, out info))
+				if (!_marketDepths.TryGetValue(key, out var info))
 				{
 					isNew = true;
 
 					info = new MarketDepthInfo(EntityFactory.CreateMarketDepth(security));
+
+					message.ToMarketDepth(info.Depth);
 
 					// стакан из лога заявок бесконечен
 					//if (CreateDepthFromOrdersLog)
@@ -1089,23 +1215,11 @@ namespace StockSharp.Algo
 				}
 				else
 				{
-					if (info.HasChanges)
-					{
-						new QuoteChangeMessage
-						{
-							LocalTime = info.First.LocalTime,
-							ServerTime = info.First.LastChangeTime,
-							Bids = info.Second,
-							Asks = info.Third
-						}.ToMarketDepth(info.First, getSecurity);
-
-						info.Second = null;
-						info.Third = null;
-					}
+					info.TryFlushChanges();
 				}
-			}
 
-			return info.First;
+				return info.Depth;
+			}
 		}
 
 		public void UpdateMarketDepth(Security security, QuoteChangeMessage message)
@@ -1113,62 +1227,78 @@ namespace StockSharp.Algo
 			lock (_marketDepths.SyncRoot)
 			{
 				var info = _marketDepths.SafeAdd(Tuple.Create(security, message.IsFiltered), key => new MarketDepthInfo(EntityFactory.CreateMarketDepth(security)));
-
-				info.First.LocalTime = message.LocalTime;
-				info.First.LastChangeTime = message.ServerTime;
-
-				info.Second = message.Bids;
-				info.Third = message.Asks;
+				info.UpdateSnapshot(message);
 			}
 		}
 
 		public class Level1Info
 		{
-			public readonly object[] Values = new object[Enumerator.GetValues<Level1Fields>().Count()];
+			private readonly SyncObject _sync = new SyncObject();
+			private readonly Level1ChangeMessage _snapshot;
+
+			public Level1Info(SecurityId securityId, DateTimeOffset serverTime)
+			{
+				_snapshot = new Level1ChangeMessage
+				{
+					SecurityId = securityId,
+					ServerTime = serverTime,
+				};
+			}
+
+			public Level1ChangeMessage GetCopy()
+			{
+				lock (_sync)
+					return _snapshot.TypedClone();
+			}
+
 			public bool CanBestQuotes { get; private set; } = true;
 			public bool CanLastTrade { get; private set; } = true;
 
-			public void SetValue(Level1Fields field, object value)
+			public IEnumerable<Level1Fields> Level1Fields
 			{
-				var idx = (int)field;
+				get
+				{
+					lock (_sync)
+						return _snapshot.Changes.Keys.ToArray();
+				}
+			}
 
-				if (idx >= Values.Length)
-					return;
-
-				Values[idx] = value;
+			public void SetValue(DateTimeOffset serverTime, Level1Fields field, object value)
+			{
+				lock (_sync)
+				{
+					_snapshot.ServerTime = serverTime;
+					_snapshot.Changes[field] = value;
+				}
 			}
 
 			public object GetValue(Level1Fields field)
 			{
-				var idx = (int)field;
-
-				if (idx >= Values.Length)
-					return null;
-
-				return Values[idx];
+				lock (_sync)
+					return _snapshot.Changes.TryGetValue(field);
 			}
 
-			public void ClearBestQuotes()
+			public void ClearBestQuotes(DateTimeOffset serverTime)
 			{
 				if (!CanBestQuotes)
 					return;
 
-				foreach (var field in Messages.Extensions.BestBidFields.Cache)
-					SetValue(field, null);
+				foreach (var field in Extensions.BestBidFields.Cache)
+					SetValue(serverTime, field, null);
 
-				foreach (var field in Messages.Extensions.BestAskFields.Cache)
-					SetValue(field, null);
+				foreach (var field in Extensions.BestAskFields.Cache)
+					SetValue(serverTime, field, null);
 
 				CanBestQuotes = false;
 			}
 
-			public void ClearLastTrade()
+			public void ClearLastTrade(DateTimeOffset serverTime)
 			{
 				if (!CanLastTrade)
 					return;
 
-				foreach (var field in Messages.Extensions.LastTradeFields.Cache)
-					SetValue(field, null);
+				foreach (var field in Extensions.LastTradeFields.Cache)
+					SetValue(serverTime, field, null);
 
 				CanLastTrade = false;
 			}
@@ -1194,23 +1324,63 @@ namespace StockSharp.Algo
 			if (security == null)
 				throw new ArgumentNullException(nameof(security));
 
-			var info = _securityValues.TryGetValue(security);
+			if (_securityValues.TryGetValue(security, out var info))
+				return info.Level1Fields;
 
-			if (info == null)
-				return Enumerable.Empty<Level1Fields>();
-
-			var fields = new List<Level1Fields>(30);
-
-			for (var i = 0; i < info.Values.Length; i++)
-			{
-				if (info.Values[i] != null)
-					fields.Add((Level1Fields)i);
-			}
-
-			return fields;
+			return Enumerable.Empty<Level1Fields>();
 		}
 
-		public Level1Info GetSecurityValues(Security security)
-			=> _securityValues.SafeAdd(security, key => new Level1Info());
+		public Level1Info GetSecurityValues(Security security, DateTimeOffset serverTime)
+			=> _securityValues.SafeAdd(security, key => new Level1Info(security.ToSecurityId(), serverTime));
+
+		IEnumerable<Message> ISnapshotHolder.GetSnapshot(ISubscriptionMessage subscription)
+		{
+			if (subscription is null)
+				throw new ArgumentNullException(nameof(subscription));
+
+			var security = subscription is ISecurityIdMessage secIdMsg ? _tryGetSecurity(secIdMsg.SecurityId) : null;
+			var dataType = subscription.DataType;
+
+			if (dataType == DataType.Level1)
+			{
+				if (security == null)
+					return Enumerable.Empty<Message>();
+
+				if (_securityValues.TryGetValue(security, out var info))
+					return new[] { info.GetCopy() };
+			}
+			else if (dataType == DataType.MarketDepth)
+			{
+				if (security == null)
+					return Enumerable.Empty<Message>();
+
+				lock (_marketDepths.SyncRoot)
+				{
+					if (_marketDepths.TryGetValue(Tuple.Create(security, false), out var info))
+					{
+						var copy = info.GetCopy();
+
+						if (copy != null)
+							return new[] { copy };
+					}
+				}
+			}
+			else if (dataType == DataType.Transactions)
+			{
+				lock (_orders.SyncRoot)
+					return _orders.Keys.Select(o => o.ToMessage()).Where(m => m.IsMatch(subscription)).ToArray();
+			}
+			else if (dataType == DataType.PositionChanges)
+			{
+				var positions = _positionProvider.Positions;
+
+				if (subscription is PortfolioLookupMessage lookupMsg)
+					positions = positions.Filter(lookupMsg);
+
+				return positions.Select(p => p.ToChangeMessage()).ToArray();
+			}
+
+			return Enumerable.Empty<Message>();
+		}
 	}
 }

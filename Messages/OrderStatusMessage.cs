@@ -16,7 +16,10 @@ Copyright 2010 by StockSharp, LLC
 namespace StockSharp.Messages
 {
 	using System;
+	using System.Linq;
 	using System.Runtime.Serialization;
+
+	using Ecng.Common;
 
 	using StockSharp.Localization;
 
@@ -49,6 +52,24 @@ namespace StockSharp.Messages
 		[DataMember]
 		public bool IsSubscribe { get; set; }
 
+		private OrderStates[] _states = ArrayHelper.Empty<OrderStates>();
+
+		/// <summary>
+		/// Filter order by the specified states.
+		/// </summary>
+		[DataMember]
+		public OrderStates[] States
+		{
+			get => _states;
+			set => _states = value ?? throw new ArgumentNullException(nameof(value));
+		}
+
+		bool ISubscriptionMessage.FilterEnabled
+			=>
+			States.Length != 0 || SecurityId != default ||
+			!PortfolioName.IsEmpty() || Side != null ||
+			Volume != null || !StrategyId.IsEmpty();
+
 		/// <summary>
 		/// Initializes a new instance of the <see cref="OrderStatusMessage"/>.
 		/// </summary>
@@ -71,6 +92,7 @@ namespace StockSharp.Messages
 			destination.To = To;
 			destination.Count = Count;
 			destination.IsSubscribe = IsSubscribe;
+			destination.States = States.ToArray();
 		}
 
 		/// <summary>
@@ -99,6 +121,9 @@ namespace StockSharp.Messages
 
 			if (Count != null)
 				str += $",Count={Count.Value}";
+
+			if (States.Length > 0)
+				str += $",States={States.Select(s => s.To<string>()).JoinComma()}";
 
 			return str;
 		}

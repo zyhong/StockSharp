@@ -24,9 +24,12 @@
 		}
 
 		private readonly SyncObject _syncObject = new SyncObject();
+
 		private readonly Dictionary<long, BookInfo> _byId = new Dictionary<long, BookInfo>();
 		private readonly Dictionary<SecurityId, BookInfo> _online = new Dictionary<SecurityId, BookInfo>();
 		private readonly HashSet<long> _passThrough = new HashSet<long>();
+		private readonly CachedSynchronizedSet<long> _allSecSubscriptions = new CachedSynchronizedSet<long>();
+		private readonly CachedSynchronizedSet<long> _allSecSubscriptionsPassThrough = new CachedSynchronizedSet<long>();
 
 		/// <summary>
 		/// Initializes a new instance of the <see cref="OrderBookIncrementMessageAdapter"/>.
@@ -49,6 +52,8 @@
 						_byId.Clear();
 						_online.Clear();
 						_passThrough.Clear();
+						_allSecSubscriptions.Clear();
+						_allSecSubscriptionsPassThrough.Clear();
 					}
 
 					break;
@@ -58,34 +63,43 @@
 				{
 					var mdMsg = (MarketDataMessage)message;
 
-					if (mdMsg.SecurityId == default)
-						break;
-
-					if (mdMsg.DataType2 == DataType.MarketDepth)
+					if (mdMsg.IsSubscribe)
 					{
-						if (mdMsg.IsSubscribe)
+						if (mdMsg.DataType2 == DataType.MarketDepth)
 						{
+							var transId = mdMsg.TransactionId;
+
 							lock (_syncObject)
 							{
-								if (mdMsg.PassThroughOrderBookInrement)
+								if (mdMsg.SecurityId == default)
 								{
-									_passThrough.Add(mdMsg.TransactionId);
+									if (mdMsg.DoNotBuildOrderBookInrement)
+										_allSecSubscriptionsPassThrough.Add(transId);
+									else
+										_allSecSubscriptions.Add(transId);
+
+									break;
+								}
+
+								if (mdMsg.DoNotBuildOrderBookInrement)
+								{
+									_passThrough.Add(transId);
 									break;
 								}
 
 								var info = new BookInfo(mdMsg.SecurityId, this);
 
-								info.SubscriptionIds.Add(mdMsg.TransactionId);
+								info.SubscriptionIds.Add(transId);
 								
-								_byId.Add(mdMsg.TransactionId, info);
+								_byId.Add(transId, info);
 							}
 
-							this.AddInfoLog("OB incr subscribed {0}/{1}.", mdMsg.SecurityId, mdMsg.TransactionId);
+							this.AddInfoLog("OB incr subscribed {0}/{1}.", mdMsg.SecurityId, transId);
 						}
-						else
-						{
-							RemoveSubscription(mdMsg.OriginalTransactionId);
-						}
+					}
+					else
+					{
+						RemoveSubscription(mdMsg.OriginalTransactionId);
 					}
 
 					break;
@@ -158,9 +172,7 @@
 
 					lock (_syncObject)
 					{
-						var info = _byId.TryGetValue(id);
-
-						if (info != null)
+						if (_byId.TryGetValue(id, out var info))
 						{
 							var secId = info.Builder.SecurityId;
 
@@ -186,6 +198,16 @@
 					if (quoteMsg.State == null)
 						break;
 
+					lock (_syncObject)
+					{
+						if (_allSecSubscriptions.Count == 0 &&
+							_allSecSubscriptionsPassThrough.Count == 0 &&
+							_byId.Count == 0 &&
+							_passThrough.Count == 0 &&
+							_online.Count == 0)
+							break;
+					}
+
 					List<long> passThrough = null;
 
 					foreach (var subscriptionId in quoteMsg.GetSubscriptionIds())
@@ -197,7 +219,7 @@
 						{
 							if (!_byId.TryGetValue(subscriptionId, out var info))
 							{
-								if (_passThrough.Contains(subscriptionId))
+								if (_passThrough.Contains(subscriptionId) || _allSecSubscriptionsPassThrough.Contains(subscriptionId))
 								{
 									if (passThrough is null)
 										passThrough = new List<long>();
@@ -215,6 +237,9 @@
 
 							ids = info.SubscriptionIds.Cache;
 						}
+
+						if (_allSecSubscriptions.Count > 0)
+							ids = ids.Concat(_allSecSubscriptions.Cache);
 
 						if (clones == null)
 							clones = new List<QuoteChangeMessage>();

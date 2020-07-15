@@ -157,7 +157,7 @@ namespace StockSharp.Messages
 	/// </summary>
 	[DataContract]
 	[Serializable]
-	public class MarketDataMessage : SecurityMessage, ISubscriptionMessage
+	public class MarketDataMessage : SecurityMessage, ISubscriptionMessage, IGeneratedMessage
 	{
 		/// <inheritdoc />
 		[DataMember]
@@ -214,7 +214,7 @@ namespace StockSharp.Messages
 		public object Arg
 		{
 			get => DataType2.Arg;
-			set => DataType2.Arg = value;
+			set => DataType2 = Messages.DataType.Create(DataType2.MessageType, value);
 		}
 
 		/// <inheritdoc />
@@ -255,9 +255,7 @@ namespace StockSharp.Messages
 		[DataMember]
 		public MarketDataBuildModes BuildMode { get; set; }
 
-		/// <summary>
-		/// Which market-data type is used as a source value.
-		/// </summary>
+		/// <inheritdoc />
 		[DataMember]
 		public DataType BuildFrom { get; set; }
 
@@ -286,7 +284,7 @@ namespace StockSharp.Messages
 		/// Request <see cref="CandleStates.Finished"/> only candles.
 		/// </summary>
 		[DataMember]
-		public bool IsFinished { get; set; }
+		public bool IsFinishedOnly { get; set; }
 
 		/// <summary>
 		/// Board code.
@@ -315,7 +313,9 @@ namespace StockSharp.Messages
 		/// Pass through incremental <see cref="QuoteChangeMessage"/>.
 		/// </summary>
 		[DataMember]
-		public bool PassThroughOrderBookInrement { get; set; }
+		public bool DoNotBuildOrderBookInrement { get; set; }
+
+		bool ISubscriptionMessage.FilterEnabled => false;
 
 		/// <summary>
 		/// Initializes a new instance of the <see cref="MarketDataMessage"/>.
@@ -367,12 +367,12 @@ namespace StockSharp.Messages
 			destination.IsCalcVolumeProfile = IsCalcVolumeProfile;
 			destination.AllowBuildFromSmallerTimeFrame = AllowBuildFromSmallerTimeFrame;
 			destination.IsRegularTradingHours = IsRegularTradingHours;
-			destination.IsFinished = IsFinished;
+			destination.IsFinishedOnly = IsFinishedOnly;
 			destination.BoardCode = BoardCode;
 			destination.RefreshSpeed = RefreshSpeed;
 			destination.DepthBuilder = DepthBuilder;
 			destination.FillGaps = FillGaps;
-			destination.PassThroughOrderBookInrement = PassThroughOrderBookInrement;
+			destination.DoNotBuildOrderBookInrement = DoNotBuildOrderBookInrement;
 		}
 
 		/// <inheritdoc />
@@ -407,8 +407,8 @@ namespace StockSharp.Messages
 			if (IsRegularTradingHours)
 				str += $",RTH={IsRegularTradingHours}";
 
-			if (IsFinished)
-				str += $",Fin={IsFinished}";
+			if (IsFinishedOnly)
+				str += $",FinOnly={IsFinishedOnly}";
 
 			if (IsCalcVolumeProfile)
 				str += $",Profile={IsCalcVolumeProfile}";
@@ -422,8 +422,8 @@ namespace StockSharp.Messages
 			if (FillGaps)
 				str += $",Gaps={FillGaps}";
 
-			if (PassThroughOrderBookInrement)
-				str += $",IncOnly={PassThroughOrderBookInrement}";
+			if (DoNotBuildOrderBookInrement)
+				str += $",NotBuildInc={DoNotBuildOrderBookInrement}";
 
 			return str;
 		}

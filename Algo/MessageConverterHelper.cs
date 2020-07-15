@@ -25,7 +25,6 @@ namespace StockSharp.Algo
 	using Ecng.ComponentModel;
 
 	using StockSharp.Algo.Candles;
-	using StockSharp.Algo.Server;
 	using StockSharp.Algo.Storages;
 	using StockSharp.BusinessEntities;
 	using StockSharp.Messages;
@@ -220,6 +219,7 @@ namespace StockSharp.Algo
 				LocalTime = order.LocalTime,
 				ExpiryDate = order.ExpiryDate,
 				UserOrderId = order.UserOrderId,
+				StrategyId = order.StrategyId,
 				Commission = order.Commission,
 				CommissionCurrency = order.CommissionCurrency,
 				IsSystem = order.IsSystem,
@@ -358,6 +358,7 @@ namespace StockSharp.Algo
 				TillDate = order.ExpiryDate,
 				//IsSystem = order.IsSystem,
 				UserOrderId = order.UserOrderId,
+				StrategyId = order.StrategyId,
 				BrokerCode = order.BrokerCode,
 				ClientCode = order.ClientCode,
 				Currency = order.Currency,
@@ -398,6 +399,7 @@ namespace StockSharp.Algo
 				OrderStringId = order.StringId,
 				Volume = volume,
 				UserOrderId = order.UserOrderId,
+				StrategyId = order.StrategyId,
 				BrokerCode = order.BrokerCode,
 				ClientCode = order.ClientCode,
 				Side = order.Direction
@@ -443,6 +445,7 @@ namespace StockSharp.Algo
 				OriginalTransactionId = oldOrder.TransactionId,
 
 				UserOrderId = oldOrder.UserOrderId,
+				StrategyId = oldOrder.StrategyId,
 
 				BrokerCode = oldOrder.BrokerCode,
 				ClientCode = oldOrder.ClientCode,
@@ -770,6 +773,7 @@ namespace StockSharp.Algo
 				OrderStringId = criteria.StringId,
 				OrderType = criteria.Type,
 				UserOrderId = criteria.UserOrderId,
+				StrategyId = criteria.StrategyId,
 				BrokerCode = criteria.BrokerCode,
 				ClientCode = criteria.ClientCode,
 				Volume = volume,
@@ -789,7 +793,7 @@ namespace StockSharp.Algo
 		/// <returns>Message.</returns>
 		public static PositionChangeMessage ToChangeMessage(this Position position, long originalTransactionId = 0)
 		{
-			if (position == null)
+			if (position is null)
 				throw new ArgumentNullException(nameof(position));
 
 			return new PositionChangeMessage
@@ -799,6 +803,7 @@ namespace StockSharp.Algo
 				PortfolioName = position.Portfolio.Name,
 				SecurityId = position.Security.ToSecurityId(),
 				ClientCode = position.ClientCode,
+				StrategyId = position.StrategyId,
 				OriginalTransactionId = originalTransactionId,
 			}
 			.TryAdd(PositionChangeTypes.BeginValue, position.BeginValue, true)
@@ -1315,6 +1320,7 @@ namespace StockSharp.Algo
 			order.TimeInForce = message.TimeInForce;
 			order.ExpiryDate = message.ExpiryDate;
 			order.UserOrderId = message.UserOrderId;
+			order.StrategyId = message.StrategyId;
 			order.Comment = message.Comment;
 			order.Commission = message.Commission;
 			order.CommissionCurrency = message.CommissionCurrency;
@@ -1328,6 +1334,7 @@ namespace StockSharp.Algo
 			order.MinVolume = message.MinVolume;
 			order.PositionEffect = message.PositionEffect;
 			order.PostOnly = message.PostOnly;
+			order.SeqNum = message.SeqNum;
 
 			if (message.OrderState != null)
 				order.ApplyNewState(message.OrderState.Value);
@@ -1340,11 +1347,10 @@ namespace StockSharp.Algo
 		/// </summary>
 		/// <param name="message">Message.</param>
 		/// <param name="security">Security.</param>
-		/// <param name="getSecurity">The function for getting instrument.</param>
 		/// <returns>Market depth.</returns>
-		public static MarketDepth ToMarketDepth(this QuoteChangeMessage message, Security security, Func<SecurityId, Security> getSecurity = null)
+		public static MarketDepth ToMarketDepth(this QuoteChangeMessage message, Security security)
 		{
-			return message.ToMarketDepth(new MarketDepth(security), getSecurity);
+			return message.ToMarketDepth(new MarketDepth(security));
 		}
 
 		/// <summary>
@@ -1352,9 +1358,8 @@ namespace StockSharp.Algo
 		/// </summary>
 		/// <param name="message">Message.</param>
 		/// <param name="marketDepth">Market depth.</param>
-		/// <param name="getSecurity">The function for getting instrument.</param>
 		/// <returns>Market depth.</returns>
-		public static MarketDepth ToMarketDepth(this QuoteChangeMessage message, MarketDepth marketDepth, Func<SecurityId, Security> getSecurity = null)
+		public static MarketDepth ToMarketDepth(this QuoteChangeMessage message, MarketDepth marketDepth)
 		{
 			if (message == null)
 				throw new ArgumentNullException(nameof(message));
@@ -1760,7 +1765,7 @@ namespace StockSharp.Algo
 				IsCalcVolumeProfile = series.IsCalcVolumeProfile,
 				AllowBuildFromSmallerTimeFrame = series.AllowBuildFromSmallerTimeFrame,
 				IsRegularTradingHours = series.IsRegularTradingHours,
-				IsFinished = series.IsFinished,
+				IsFinishedOnly = series.IsFinishedOnly,
 				//ExtensionInfo = extensionInfo
 			};
 
@@ -1835,7 +1840,7 @@ namespace StockSharp.Algo
 			series.IsCalcVolumeProfile = message.IsCalcVolumeProfile;
 			series.AllowBuildFromSmallerTimeFrame = message.AllowBuildFromSmallerTimeFrame;
 			series.IsRegularTradingHours = message.IsRegularTradingHours;
-			series.IsFinished = message.IsFinished;
+			series.IsFinishedOnly = message.IsFinishedOnly;
 		}
 
 		/// <summary>
@@ -1884,62 +1889,6 @@ namespace StockSharp.Algo
 				throw new ArgumentNullException(nameof(series));
 
 			return DataType.Create(series.CandleType.ToCandleMessageType(), series.Arg);
-		}
-
-		/// <summary>
-		/// Convert <see cref="UserInfoMessage"/> to <see cref="PermissionCredentials"/> value.
-		/// </summary>
-		/// <param name="message">The message contains information about user.</param>
-		/// <returns>Credentials with set of permissions.</returns>
-		public static PermissionCredentials ToCredentials(this UserInfoMessage message)
-		{
-			if (message == null)
-				throw new ArgumentNullException(nameof(message));
-
-			var credentials = new PermissionCredentials
-			{
-				Email = message.Login,
-				Password = message.Password,
-			};
-					
-			credentials.IpRestrictions.AddRange(message.IpRestrictions);
-					
-			foreach (var permission in message.Permissions)
-			{
-				var dict = new SynchronizedDictionary<Tuple<string, string, object, DateTime?>, bool>();
-				dict.AddRange(permission.Value);
-				credentials.Permissions.Add(permission.Key, dict);
-			}
-
-			return credentials;
-		}
-
-		/// <summary>
-		/// Convert <see cref="PermissionCredentials"/> to <see cref="UserInfoMessage"/> value.
-		/// </summary>
-		/// <param name="credentials">Credentials with set of permissions.</param>
-		/// <param name="copyPassword">Copy <see cref="ServerCredentials.Password"/> value.</param>
-		/// <returns>The message contains information about user.</returns>
-		public static UserInfoMessage ToUserInfoMessage(this PermissionCredentials credentials, bool copyPassword)
-		{
-			if (credentials == null)
-				throw new ArgumentNullException(nameof(credentials));
-
-			var message = new UserInfoMessage
-			{
-				Login = credentials.Email,
-				IpRestrictions = credentials.IpRestrictions.Cache,
-			};
-
-			if (copyPassword)
-				message.Password = credentials.Password;
-
-			foreach (var permission in credentials.Permissions)
-			{
-				message.Permissions.Add(permission.Key, permission.Value.ToDictionary());
-			}
-
-			return message;
 		}
 
 		/// <summary>

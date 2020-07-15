@@ -13,17 +13,19 @@ Created: 2015, 11, 11, 2:32 PM
 Copyright 2010 by StockSharp, LLC
 *******************************************************************************************/
 #endregion S# License
+
 namespace StockSharp.Messages
 {
 	using System;
 	using System.Runtime.Serialization;
+	using System.ComponentModel;
 
 	/// <summary>
 	/// Message portfolio lookup for specified criteria.
 	/// </summary>
 	[DataContract]
 	[Serializable]
-	public class PortfolioLookupMessage : PortfolioMessage, INullableSecurityIdMessage
+	public class PortfolioLookupMessage : PortfolioMessage, INullableSecurityIdMessage, IStrategyIdMessage
 	{
 		/// <summary>
 		/// Initializes a new instance of the <see cref="PortfolioLookupMessage"/>.
@@ -34,9 +36,14 @@ namespace StockSharp.Messages
 		}
 
 		/// <inheritdoc />
+		[DataMember]
+		public string StrategyId { get; set; }
+
+		/// <inheritdoc />
 		public override DataType DataType => DataType.PositionChanges;
 
 		/// <inheritdoc />
+		[TypeConverter(typeof(StringToSecurityIdTypeConverter))]
 		public SecurityId? SecurityId { get; set; }
 
 		/// <summary>
@@ -45,9 +52,21 @@ namespace StockSharp.Messages
 		/// <returns>Copy.</returns>
 		public override Message Clone()
 		{
-			var clone = new PortfolioLookupMessage { SecurityId = SecurityId };
+			var clone = new PortfolioLookupMessage();
 			CopyTo(clone);
 			return clone;
+		}
+
+		/// <summary>
+		/// Copy the message into the <paramref name="destination" />.
+		/// </summary>
+		/// <param name="destination">The object, to which copied information.</param>
+		protected virtual void CopyTo(PortfolioLookupMessage destination)
+		{
+			base.CopyTo(destination);
+
+			destination.SecurityId = SecurityId;
+			destination.StrategyId = StrategyId;
 		}
 
 		/// <inheritdoc />
@@ -60,6 +79,9 @@ namespace StockSharp.Messages
 
 			if (SecurityId != null)
 				str += $",Sec={SecurityId}";
+
+			if (StrategyId != null)
+				str += $",Strategy={StrategyId}";
 
 			return str;
 		}

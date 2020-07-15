@@ -338,7 +338,7 @@ namespace StockSharp.Messages
 		public IEnumerable<Level1Fields> CandlesBuildFrom => InnerAdapter.CandlesBuildFrom;
 
 		/// <inheritdoc />
-		public bool IsSupportTransactionLog => InnerAdapter.IsSupportTransactionLog;
+		public virtual bool IsSupportTransactionLog => InnerAdapter.IsSupportTransactionLog;
 
 		Type IMessageAdapter.OrderConditionType => InnerAdapter.OrderConditionType;
 
@@ -348,10 +348,25 @@ namespace StockSharp.Messages
 
 		bool IMessageAdapter.IsAutoReplyOnTransactonalUnsubscription => InnerAdapter.IsAutoReplyOnTransactonalUnsubscription;
 
+		bool IMessageAdapter.IsReplaceCommandEditCurrent => InnerAdapter.IsReplaceCommandEditCurrent;
+
 		bool IMessageAdapter.EnqueueSubscriptions
 		{
 			get => InnerAdapter.EnqueueSubscriptions;
 			set => InnerAdapter.EnqueueSubscriptions = value;
+		}
+
+		bool IMessageAdapter.UseChannels => InnerAdapter.UseChannels;
+
+		string IMessageAdapter.FeatureName => InnerAdapter.FeatureName;
+
+		/// <inheritdoc />
+		public virtual bool? IsPositionsEmulationRequired => InnerAdapter.IsPositionsEmulationRequired;
+
+		bool IMessageAdapter.GenerateOrderBookFromLevel1
+		{
+			get => InnerAdapter.GenerateOrderBookFromLevel1;
+			set => InnerAdapter.GenerateOrderBookFromLevel1 = value;
 		}
 
 		IOrderLogMarketDepthBuilder IMessageAdapter.CreateOrderLogMarketDepthBuilder(SecurityId securityId)

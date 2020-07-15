@@ -17,61 +17,63 @@ namespace StockSharp.Algo
 
 	partial class Connector
 	{
-		private class SubscriptionManager
+		private class SubscriptionInfo
 		{
-			private class SubscriptionInfo
+			private DateTimeOffset? _last;
+
+			public SubscriptionInfo(Subscription subscription, SubscriptionInfo parent)
 			{
-				private DateTimeOffset? _last;
+				Subscription = subscription ?? throw new ArgumentNullException(nameof(subscription));
+				Parent = parent;
 
-				public SubscriptionInfo(Subscription subscription)
+				if (Subscription.CandleSeries != null)
+					Holder = new CandlesSeriesHolder(subscription.CandleSeries);
+
+				_last = subscription.SubscriptionMessage.From;
+
+				var type = subscription.DataType;
+
+				if (type == DataType.PositionChanges ||
+					type == DataType.Securities ||
+					type == DataType.Board ||
+					type == DataType.TimeFrames)
 				{
-					Subscription = subscription ?? throw new ArgumentNullException(nameof(subscription));
-
-					if (Subscription.CandleSeries != null)
-						Holder = new CandlesSeriesHolder(subscription.CandleSeries);
-
-					_last = subscription.SubscriptionMessage.From;
-
-					var type = subscription.DataType;
-
-					if (type == DataType.PositionChanges ||
-					    type == DataType.Securities ||
-					    type == DataType.Board ||
-					    type == DataType.TimeFrames)
-					{
-						LookupItems = new List<object>();
-					}
+					LookupItems = new List<object>();
 				}
-
-				public Subscription Subscription { get; }
-				public bool HasResult { get; set; }
-				public List<object> LookupItems { get; }
-				public CandlesSeriesHolder Holder { get; }
-
-				public ISubscriptionMessage CreateSubscriptionContinue()
-				{
-					var subscrMsg = Subscription.SubscriptionMessage.TypedClone();
-
-					if (_last != null)
-						subscrMsg.From = _last.Value;
-
-					return subscrMsg;
-				}
-
-				public bool UpdateLastTime(DateTimeOffset time)
-				{
-					if (_last == null || _last.Value <= time)
-					{
-						_last = time;
-						return true;
-					}
-
-					return false;
-				}
-
-				public override string ToString() => Subscription.ToString();
 			}
 
+			public SubscriptionInfo Parent { get; }
+			public Subscription Subscription { get; }
+			public bool HasResult { get; set; }
+			public List<object> LookupItems { get; }
+			public CandlesSeriesHolder Holder { get; }
+
+			public ISubscriptionMessage CreateSubscriptionContinue()
+			{
+				var subscrMsg = Subscription.SubscriptionMessage.TypedClone();
+
+				if (_last != null)
+					subscrMsg.From = _last.Value;
+
+				return subscrMsg;
+			}
+
+			public bool UpdateLastTime(DateTimeOffset time)
+			{
+				if (_last == null || _last.Value <= time)
+				{
+					_last = time;
+					return true;
+				}
+
+				return false;
+			}
+
+			public override string ToString() => Subscription.ToString();
+		}
+
+		private class SubscriptionManager
+		{
 			private readonly SyncObject _syncObject = new SyncObject();
 
 			private readonly Dictionary<long, SubscriptionInfo> _subscriptions = new Dictionary<long, SubscriptionInfo>();
@@ -137,16 +139,19 @@ namespace StockSharp.Algo
 				_connector.AddInfoLog("Subscription {0} removed.", id);
 			}
 
-			private SubscriptionInfo TryGetInfo(long id, bool remove, DateTimeOffset? time = null, bool addLog = true)
+			private SubscriptionInfo TryGetInfo(long id, bool ignoreAll, bool remove, DateTimeOffset? time, bool addLog)
 			{
 				lock (_syncObject)
 				{
-					if (_subscriptionAllMap.TryGetValue(id, out var parentId))
+					if (_subscriptionAllMap.ContainsKey(id))
 					{
+						if (ignoreAll)
+							return null;
+
 						if (remove)
 							_subscriptionAllMap.Remove(id);
 
-						id = parentId;
+						//id = parentId;
 					}
 
 					if (_subscriptions.TryGetValue(id, out var info))
@@ -173,51 +178,35 @@ namespace StockSharp.Algo
 			{
 				var time = message is IServerTimeMessage timeMsg ? timeMsg.ServerTime : (DateTimeOffset?)null;
 
+				var processed = new HashSet<SubscriptionInfo>();
+
 				foreach (var id in message.GetSubscriptionIds())
 				{
-					var subscription = TryGetSubscription(id, false, time);
+					var info = TryGetSubscription(id, false, false, time);
 
-					if (subscription != null)
-						yield return subscription;
+					if (info == null)
+						continue;
+
+					if (!processed.Add(info))
+						continue;
+
+					if (info.Parent == null)
+					{
+						yield return info.Subscription;
+					}
+					else
+					{
+						if (!processed.Add(info.Parent))
+							continue;
+
+						yield return info.Parent.Subscription;
+					}
 				}
 			}
 
-			private Subscription TryGetSubscription(long id, bool remove, DateTimeOffset? time, out SubscriptionInfo info)
+			public SubscriptionInfo TryGetSubscription(long id, bool ignoreAll, bool remove, DateTimeOffset? time)
 			{
-				info = TryGetInfo(id, remove, time);
-				return info?.Subscription;
-			}
-
-			public Subscription TryGetSubscription(long id, bool remove, DateTimeOffset? time = null)
-			{
-				return TryGetSubscription(id, remove, time, out _);
-			}
-
-			public Subscription TryFindSubscription(long id, DataType dataType, Security security = null)
-			{
-				var secId = security?.ToSecurityId();
-
-				var subscription = id > 0
-					? TryGetSubscription(id, false)
-					: Subscriptions.FirstOrDefault(s => s.DataType == dataType && s.SecurityId == secId && s.State.IsActive());
-
-				if (subscription == null)
-					_connector.AddWarningLog(LocalizedStrings.SubscriptionNonExist, id > 0 ? (object)id : Tuple.Create(dataType, security));
-
-				return subscription;
-			}
-
-			public Subscription TryFindSubscription(CandleSeries series)
-			{
-				if (series == null)
-					throw new ArgumentNullException(nameof(series));
-
-				var subscription = Subscriptions.FirstOrDefault(s => s.CandleSeries == series);
-
-				if (subscription == null)
-					_connector.AddWarningLog(LocalizedStrings.SubscriptionNonExist, series);
-
-				return subscription;
+				return TryGetInfo(id, ignoreAll, remove, time, true);
 			}
 
 			public void RegisterPortfolio(Portfolio portfolio)
@@ -249,14 +238,17 @@ namespace StockSharp.Algo
 				}
 			}
 
-			private void ChangeState(Subscription subscription, SubscriptionStates state)
+			private void ChangeState(SubscriptionInfo info, SubscriptionStates state)
 			{
-				subscription.State = subscription.State.ChangeSubscriptionState(state, subscription.TransactionId, _connector);
+				var subscription = info.Subscription;
+				subscription.State = subscription.State.ChangeSubscriptionState(state, subscription.TransactionId, _connector, info.Parent == null);
 			}
 
 			public Subscription ProcessResponse(SubscriptionResponseMessage response, out ISubscriptionMessage originalMsg, out bool unexpectedCancelled)
 			{
 				originalMsg = null;
+
+				SubscriptionInfo info = null;
 
 				try
 				{
@@ -275,9 +267,9 @@ namespace StockSharp.Algo
 
 						originalMsg = tuple.Item1;
 
-						var info = originalMsg.IsSubscribe
-							? TryGetInfo(originalMsg.TransactionId, false, addLog: false)
-							: TryGetInfo(originalMsg.OriginalTransactionId, true, addLog: false);
+						info = originalMsg.IsSubscribe
+							? TryGetInfo(originalMsg.TransactionId, false, false, null, false)
+							: TryGetInfo(originalMsg.OriginalTransactionId, false, true, null, false);
 
 						if (info == null)
 						{
@@ -291,11 +283,11 @@ namespace StockSharp.Algo
 						{
 							if (response.IsOk())
 							{
-								ChangeState(subscription, SubscriptionStates.Active);
+								ChangeState(info, SubscriptionStates.Active);
 							}
 							else
 							{
-								ChangeState(subscription, SubscriptionStates.Error);
+								ChangeState(info, SubscriptionStates.Error);
 
 								Remove(subscription.TransactionId);
 
@@ -306,7 +298,7 @@ namespace StockSharp.Algo
 						}
 						else
 						{
-							ChangeState(subscription, SubscriptionStates.Stopped);
+							ChangeState(info, SubscriptionStates.Stopped);
 
 							Remove(subscription.TransactionId);
 
@@ -315,12 +307,18 @@ namespace StockSharp.Algo
 							_requests.Remove(response.OriginalTransactionId);
 						}
 
+						if (info.Parent != null)
+						{
+							originalMsg = null;
+							return null;
+						}
+
 						return subscription;
 					}
 				}
 				finally
 				{
-					if (originalMsg == null)
+					if (info == null)
 						TryWriteLog(response.OriginalTransactionId);
 				}
 			}
@@ -337,7 +335,7 @@ namespace StockSharp.Algo
 
 				lock (_syncObject)
 				{
-					var info = new SubscriptionInfo(subscription);
+					var info = new SubscriptionInfo(subscription, _subscriptionAllMap.TryGetValue(subscription.TransactionId, out var parentId) ? _subscriptions.TryGetValue(parentId) : null);
 
 					if (subscrMsg is OrderStatusMessage)
 						_connector._entityCache.AddOrderStatusTransactionId(subscription.TransactionId);
@@ -351,7 +349,7 @@ namespace StockSharp.Algo
 				if (keepBackMode)
 					clone.BackMode = subscrMsg.BackMode;
 
-				SendRequest(clone, subscription);
+				SendRequest(clone, subscription, !keepBackMode);
 			}
 
 			public void UnSubscribe(Subscription subscription)
@@ -375,15 +373,17 @@ namespace StockSharp.Algo
 				if (unsubscribe.IsSubscribe)
 					return;
 
-				SendRequest(unsubscribe, subscription);
+				SendRequest(unsubscribe, subscription, true);
 			}
 
-			private void SendRequest(ISubscriptionMessage request, Subscription subscription)
+			private void SendRequest(ISubscriptionMessage request, Subscription subscription, bool needLog)
 			{
 				lock (_syncObject)
 					_requests.Add(request.TransactionId, Tuple.Create(request, subscription));
 
-				_connector.AddInfoLog(request.IsSubscribe ? LocalizedStrings.SubscriptionSent : LocalizedStrings.UnSubscriptionSent, subscription.SecurityId, request);
+				if (needLog)
+					_connector.AddInfoLog(request.IsSubscribe ? LocalizedStrings.SubscriptionSent : LocalizedStrings.UnSubscriptionSent, subscription.SecurityId, request);
+
 				_connector.SendInMessage((Message)request);
 			}
 
@@ -421,7 +421,7 @@ namespace StockSharp.Algo
 
 				foreach (var pair in requests)
 				{
-					SendRequest(pair.Key, pair.Value.Subscription);
+					SendRequest(pair.Key, pair.Value.Subscription, true);
 				}
 			}
 
@@ -456,7 +456,7 @@ namespace StockSharp.Algo
 
 				foreach (var id in message.GetSubscriptionIds())
 				{
-					var info = TryGetInfo(id, false);
+					var info = TryGetInfo(id, true, false, null, true);
 
 					if (info == null || info.HasResult)
 						continue;
@@ -478,19 +478,26 @@ namespace StockSharp.Algo
 			{
 				lock (_syncObject)
 				{
-					var subscription = TryGetSubscription(message.OriginalTransactionId, true, null, out var info);
+					var info = TryGetSubscription(message.OriginalTransactionId, false, true, null);
 
-					if (subscription != null)
+					if (info == null)
 					{
-						items = info.LookupItems?.CopyAndClear() ?? ArrayHelper.Empty<object>();
-
-						ChangeState(subscription, SubscriptionStates.Finished);
-						_requests.Remove(message.OriginalTransactionId);
+						items = ArrayHelper.Empty<object>();
+						return null;
 					}
+
+					if (info.Parent == null)
+						items = info.LookupItems?.CopyAndClear() ?? ArrayHelper.Empty<object>();
 					else
 						items = ArrayHelper.Empty<object>();
 
-					return subscription;
+					ChangeState(info, SubscriptionStates.Finished);
+					_requests.Remove(message.OriginalTransactionId);
+
+					if (info.Parent != null)
+						return null;
+
+					return info.Subscription;
 				}
 			}
 
@@ -498,17 +505,25 @@ namespace StockSharp.Algo
 			{
 				lock (_syncObject)
 				{
-					var subscription = TryGetSubscription(message.OriginalTransactionId, false, null, out var info);
+					var info = TryGetSubscription(message.OriginalTransactionId, false, false, null);
 
-					if (subscription != null)
+					if (info == null)
 					{
-						items = info.LookupItems?.CopyAndClear() ?? ArrayHelper.Empty<object>();
-						ChangeState(subscription, SubscriptionStates.Online);
+						items = ArrayHelper.Empty<object>();
+						return null;
 					}
+
+					if (info.Parent == null)
+						items = info.LookupItems?.CopyAndClear() ?? ArrayHelper.Empty<object>();
 					else
 						items = ArrayHelper.Empty<object>();
 
-					return subscription;
+					ChangeState(info, SubscriptionStates.Online);
+
+					if (info.Parent != null)
+						return null;
+
+					return info.Subscription;
 				}
 			}
 

@@ -18,6 +18,7 @@ namespace StockSharp.BusinessEntities
 	using System;
 	using System.Collections.Generic;
 	using System.ComponentModel;
+	using System.ComponentModel.DataAnnotations;
 	using System.Runtime.Serialization;
 	using System.Xml.Serialization;
 
@@ -51,9 +52,12 @@ namespace StockSharp.BusinessEntities
 		/// Time taken to register an order.
 		/// </summary>
 		[TimeSpan]
-		[DisplayNameLoc(LocalizedStrings.Str517Key)]
-		[DescriptionLoc(LocalizedStrings.Str518Key)]
-		[StatisticsCategory]
+		[Display(
+			ResourceType = typeof(LocalizedStrings),
+			Name = LocalizedStrings.Str538Key,
+			Description = LocalizedStrings.Str518Key,
+			GroupName = LocalizedStrings.Str161Key,
+			Order = 1000)]
 		[Nullable]
 		public TimeSpan? LatencyRegistration
 		{
@@ -74,9 +78,12 @@ namespace StockSharp.BusinessEntities
 		/// Time taken to cancel an order.
 		/// </summary>
 		[TimeSpan]
-		[DisplayNameLoc(LocalizedStrings.Str519Key)]
-		[DescriptionLoc(LocalizedStrings.Str520Key)]
-		[StatisticsCategory]
+		[Display(
+			ResourceType = typeof(LocalizedStrings),
+			Name = LocalizedStrings.Str537Key,
+			Description = LocalizedStrings.Str520Key,
+			GroupName = LocalizedStrings.Str161Key,
+			Order = 1001)]
 		[Nullable]
 		public TimeSpan? LatencyCancellation
 		{
@@ -88,6 +95,32 @@ namespace StockSharp.BusinessEntities
 
 				_latencyCancellation = value;
 				NotifyChanged(nameof(LatencyCancellation));
+			}
+		}
+
+		private TimeSpan? _latencyEdition;
+
+		/// <summary>
+		/// Time taken to edit an order.
+		/// </summary>
+		[TimeSpan]
+		[Display(
+			ResourceType = typeof(LocalizedStrings),
+			Name = LocalizedStrings.EditionKey,
+			Description = LocalizedStrings.EditionLatencyKey,
+			GroupName = LocalizedStrings.Str161Key,
+			Order = 1002)]
+		[Nullable]
+		public TimeSpan? LatencyEdition
+		{
+			get => _latencyEdition;
+			set
+			{
+				if (_latencyEdition == value)
+					return;
+
+				_latencyEdition = value;
+				NotifyChanged(nameof(LatencyEdition));
 			}
 		}
 
@@ -522,6 +555,12 @@ namespace StockSharp.BusinessEntities
 		public string UserOrderId { get; set; }
 
 		/// <summary>
+		/// Strategy id.
+		/// </summary>
+		[DataMember]
+		public string StrategyId { get; set; }
+
+		/// <summary>
 		/// Broker firm code.
 		/// </summary>
 		[DataMember]
@@ -611,11 +650,24 @@ namespace StockSharp.BusinessEntities
 		[DataMember]
 		public bool? PostOnly { get; set; }
 
+		/// <summary>
+		/// Sequence number.
+		/// </summary>
+		/// <remarks>Zero means no information.</remarks>
+		[DataMember]
+		public long SeqNum { get; set; }
+
 		/// <inheritdoc />
 		public override string ToString()
 		{
 			var str = LocalizedStrings.Str534Params
 				.Put(TransactionId, Id == null ? StringId : Id.To<string>(), Security?.Id, Portfolio?.Name, Direction == Sides.Buy ? LocalizedStrings.Str403 : LocalizedStrings.Str404, Price, Volume, State, Balance, Type);
+
+			if (!UserOrderId.IsEmpty())
+				str += $" UID={UserOrderId}";
+
+			if (!StrategyId.IsEmpty())
+				str += $" Strategy={StrategyId}";
 
 			if (Condition != null)
 				str += $" Condition={Condition}";
@@ -631,6 +683,9 @@ namespace StockSharp.BusinessEntities
 
 			if (PostOnly != null)
 				str += $",PostOnly={PostOnly.Value}";
+
+			if (SeqNum != 0)
+				str += $",SeqNum={SeqNum}";
 
 			return str;
 		}

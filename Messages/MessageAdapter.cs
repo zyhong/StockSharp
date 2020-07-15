@@ -221,6 +221,12 @@ namespace StockSharp.Messages
 		[Browsable(false)]
 		public Platforms Platform { get; protected set; }
 
+		/// <summary>
+		/// Feature name.
+		/// </summary>
+		[Browsable(false)]
+		public virtual string FeatureName => string.Empty;
+
 		/// <inheritdoc />
 		[Browsable(false)]
 		public virtual IEnumerable<Tuple<string, Type>> SecurityExtendedFields { get; } = Enumerable.Empty<Tuple<string, Type>>();
@@ -271,6 +277,19 @@ namespace StockSharp.Messages
 		/// <inheritdoc />
 		[Browsable(false)]
 		public virtual bool IsSupportTransactionLog => false;
+
+		/// <inheritdoc />
+		[Browsable(false)]
+		public virtual bool IsReplaceCommandEditCurrent => false;
+
+		/// <inheritdoc />
+		[Display(
+			ResourceType = typeof(LocalizedStrings),
+			Name = LocalizedStrings.Level1Key,
+			Description = LocalizedStrings.Level1ToOrderBooksKey,
+			GroupName = LocalizedStrings.Str186Key,
+			Order = 302)]
+		public virtual bool GenerateOrderBookFromLevel1 { get; set; } = true;
 
 		/// <inheritdoc />
 		[CategoryLoc(LocalizedStrings.Str174Key)]
@@ -541,6 +560,14 @@ namespace StockSharp.Messages
 		public virtual bool IsSecurityRequired(DataType dataType) => dataType.IsSecurityRequired;
 
 		/// <inheritdoc />
+		[Browsable(false)]
+		public virtual bool UseChannels => false;
+
+		/// <inheritdoc />
+		[Browsable(false)]
+		public virtual bool? IsPositionsEmulationRequired => null;
+
+		/// <inheritdoc />
 		[ReadOnly(false)]
 		public override string Name
 		{
@@ -563,11 +590,12 @@ namespace StockSharp.Messages
 
 					return i.To<MessageTypes>();
 				}).ToArray();
-			
+
 			if (storage.ContainsKey(nameof(ReConnectionSettings)))
 				ReConnectionSettings.Load(storage.GetValue<SettingsStorage>(nameof(ReConnectionSettings)));
 
 			EnqueueSubscriptions = storage.GetValue(nameof(EnqueueSubscriptions), EnqueueSubscriptions);
+			GenerateOrderBookFromLevel1 = storage.GetValue(nameof(GenerateOrderBookFromLevel1), GenerateOrderBookFromLevel1);
 
 			base.Load(storage);
 		}
@@ -580,6 +608,7 @@ namespace StockSharp.Messages
 			storage.SetValue(nameof(SupportedInMessages), SupportedInMessages.Select(t => t.To<string>()).ToArray());
 			storage.SetValue(nameof(ReConnectionSettings), ReConnectionSettings.Save());
 			storage.SetValue(nameof(EnqueueSubscriptions), EnqueueSubscriptions);
+			storage.SetValue(nameof(GenerateOrderBookFromLevel1), GenerateOrderBookFromLevel1);
 
 			base.Save(storage);
 		}

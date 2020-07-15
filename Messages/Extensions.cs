@@ -40,8 +40,8 @@ namespace StockSharp.Messages
 	{
 		static Extensions()
 		{
-			string TimeSpanToString(TimeSpan arg) => arg.ToString().Replace(':', '-');
-			TimeSpan StringToTimeSpan(string str) => str.Replace('-', ':').To<TimeSpan>();
+			static string TimeSpanToString(TimeSpan arg) => arg.ToString().Replace(':', '-');
+			static TimeSpan StringToTimeSpan(string str) => str.Replace('-', ':').To<TimeSpan>();
 
 			RegisterCandleType(typeof(TimeFrameCandleMessage), MessageTypes.CandleTimeFrame, MarketDataTypes.CandleTimeFrame, typeof(TimeFrameCandleMessage).Name.Remove(nameof(Message)), StringToTimeSpan, TimeSpanToString);
 			RegisterCandleType(typeof(TickCandleMessage), MessageTypes.CandleTick, MarketDataTypes.CandleTick, typeof(TickCandleMessage).Name.Remove(nameof(Message)), str => str.To<int>(), arg => arg.ToString());
@@ -219,27 +219,37 @@ namespace StockSharp.Messages
 		/// Cast <see cref="OrderMessage"/> to the <see cref="ExecutionMessage"/>.
 		/// </summary>
 		/// <param name="message"><see cref="OrderMessage"/>.</param>
+		/// <param name="error">Error info.</param>
 		/// <returns><see cref="ExecutionMessage"/>.</returns>
-		public static ExecutionMessage CreateReply(this OrderMessage message)
+		public static ExecutionMessage CreateReply(this OrderMessage message, Exception error = null)
 		{
-			if (message == null)
+			if (message is null)
 				throw new ArgumentNullException(nameof(message));
 
-			return message.TransactionId.CreateOrderReply();
+			var reply = message.TransactionId.CreateOrderReply(message.LocalTime);
+
+			reply.Error = error;
+
+			if (error != null)
+				reply.OrderState = OrderStates.Failed;
+
+			return reply;
 		}
 
 		/// <summary>
 		/// Create order's transaction reply.
 		/// </summary>
 		/// <param name="transactionId">Transaction ID.</param>
+		/// <param name="serverTime">Server time.</param>
 		/// <returns>The message contains information about the execution.</returns>
-		public static ExecutionMessage CreateOrderReply(this long transactionId)
+		public static ExecutionMessage CreateOrderReply(this long transactionId, DateTimeOffset serverTime)
 		{
 			return new ExecutionMessage
 			{
 				OriginalTransactionId = transactionId,
 				ExecutionType = ExecutionTypes.Transaction,
 				HasOrderInfo = true,
+				ServerTime = serverTime,
 			};
 		}
 
@@ -460,11 +470,11 @@ namespace StockSharp.Messages
 			if (adapter == null)
 				throw new ArgumentNullException(nameof(adapter));
 
-			adapter.SupportedMarketDataTypes = adapter.SupportedMarketDataTypes.Concat(dataType).ToArray();
+			adapter.SupportedMarketDataTypes = adapter.SupportedMarketDataTypes.Concat(dataType).Distinct().ToArray();
 		}
 
 		/// <summary>
-		/// Remove market data type from <see cref="IMessageAdapter.SupportedInMessages"/>.
+		/// Remove market data type from <see cref="IMessageAdapter.SupportedMarketDataTypes"/>.
 		/// </summary>
 		/// <param name="adapter">Adapter.</param>
 		/// <param name="type">Market data type.</param>
@@ -565,12 +575,59 @@ namespace StockSharp.Messages
 		/// <returns><see langword="true" />, if data type is candle, otherwise, <see langword="false" />.</returns>
 		public static bool IsCandle(this MessageTypes type)	=> _candleDataTypes.ContainsKey(type);
 
+		private static readonly SynchronizedPairSet<MessageTypes, Type> _messageTypeMap = new SynchronizedPairSet<MessageTypes, Type>();
+
 		/// <summary>
-		/// To convert the type of candles <see cref="CandleMessage"/> into type of message <see cref="MessageTypes"/>.
+		/// Convert <see cref="Type"/> to <see cref="MessageTypes"/> value.
 		/// </summary>
-		/// <param name="type">Candles type.</param>
-		/// <returns>Message type.</returns>
-		public static MessageTypes ToMessageType(this Type type) => _candleDataTypes[type];
+		/// <param name="type"><see cref="Type"/> value.</param>
+		/// <returns><see cref="MessageTypes"/> value.</returns>
+		public static MessageTypes ToMessageType(this Type type)
+		{
+			lock (_messageTypeMap.SyncRoot)
+			{
+				if (_messageTypeMap.TryGetKey(type, out var enumVal))
+					return enumVal;
+
+				if (!_candleDataTypes.TryGetKey(type, out enumVal))
+					enumVal = type.CreateInstance<Message>().Type;
+
+				_messageTypeMap.Add(enumVal, type);
+				return enumVal;
+			}
+		}
+
+		/// <summary>
+		/// Convert <see cref="MessageTypes"/> to <see cref="Type"/> value.
+		/// </summary>
+		/// <param name="type"><see cref="MessageTypes"/> value.</param>
+		/// <returns><see cref="Type"/> value.</returns>
+		public static Type ToMessageType(this MessageTypes type)
+		{
+			lock (_messageTypeMap.SyncRoot)
+			{
+				if (_messageTypeMap.TryGetValue(type, out var typeVal))
+					return typeVal;
+
+				if (_candleDataTypes.TryGetValue(type, out typeVal))
+					_messageTypeMap.Add(type, typeVal);
+				else
+				{
+					var types = typeof(Message)
+						.Assembly
+						.GetTypes()
+						.Where(t => !t.IsAbstract && !t.IsInterface && t.IsSubclassOf(typeof(Message)));
+
+					foreach (var type1 in types)
+						type1.ToMessageType();
+
+					if (!_messageTypeMap.TryGetValue(type, out typeVal))
+						throw new ArgumentOutOfRangeException(nameof(type), type, LocalizedStrings.Str1219);
+				}
+				
+				return typeVal;
+			}
+		}
 
 		/// <summary>
 		/// To convert the type of message <see cref="MessageTypes"/> into type of candles <see cref="CandleMessage"/>.
@@ -649,6 +706,7 @@ namespace StockSharp.Messages
 			{ DataType.PositionChanges, "position" },
 			{ DataType.News, "news" },
 			{ DataType.Board, "board" },
+			{ DataType.BoardState, "board_state" },
 		};
 
 		/// <summary>
@@ -725,13 +783,13 @@ namespace StockSharp.Messages
 			if (argParserFrom is null)
 				throw new ArgumentNullException(nameof(argParserFrom));
 
-			T Do<T>(Func<T> func) => CultureInfo.InvariantCulture.DoInCulture(func);
+			static T Do<T>(Func<T> func) => CultureInfo.InvariantCulture.DoInCulture(func);
 
 			Func<string, object> p1 = str => Do(() => argParserTo(str));
 			Func<object, string> p2 = arg => arg is string s ? s : Do(() => argParserFrom((TArg)arg));
 
 #pragma warning disable CS0612 // Type or member is obsolete
-			_messageTypeMap.Add(dataType, Tuple.Create(type, default(object)));
+			_messageTypeMapOld.Add(dataType, Tuple.Create(type, default(object)));
 #pragma warning restore CS0612 // Type or member is obsolete
 
 			_candleDataTypes.Add(type, messageType);
@@ -881,7 +939,7 @@ namespace StockSharp.Messages
 		}
 
 		/// <summary>
-		/// Remove all market data types from <see cref="IMessageAdapter.SupportedInMessages"/>.
+		/// Remove all market data types from <see cref="IMessageAdapter.SupportedMarketDataTypes"/>.
 		/// </summary>
 		/// <param name="adapter">Adapter.</param>
 		public static void RemoveSupportedAllMarketDataTypes(this MessageAdapter adapter)
@@ -1724,10 +1782,6 @@ namespace StockSharp.Messages
 
 			void SendOutErrorExecution(ExecutionMessage execMsg)
 			{
-				execMsg.ServerTime = logs.CurrentTime;
-				execMsg.Error = ex;
-				execMsg.OrderState = OrderStates.Failed;
-
 				var subscribers = getSubscribers?.Invoke(DataType.Transactions);
 
 				if (subscribers != null)
@@ -1751,13 +1805,13 @@ namespace StockSharp.Messages
 				case MessageTypes.OrderCancel:
 				case MessageTypes.OrderGroupCancel:
 				{
-					var replyMsg = ((OrderMessage)message).CreateReply();
+					var replyMsg = ((OrderMessage)message).CreateReply(ex);
 					SendOutErrorExecution(replyMsg);
 					break;
 				}
 				case MessageTypes.OrderPairReplace:
 				{
-					var replyMsg = ((OrderPairReplaceMessage)message).Message1.CreateReply();
+					var replyMsg = ((OrderPairReplaceMessage)message).Message1.CreateReply(ex);
 					SendOutErrorExecution(replyMsg);
 					break;
 				}
@@ -2254,6 +2308,7 @@ namespace StockSharp.Messages
 				ServerTime = (DateTimeOffset?)level1.Changes.TryGetValue(Level1Fields.LastTradeTime) ?? level1.ServerTime,
 				IsUpTick = (bool?)level1.Changes.TryGetValue(Level1Fields.LastTradeUpDown),
 				LocalTime = level1.LocalTime,
+				BuildFrom = level1.BuildFrom ?? DataType.Level1,
 			};
 		}
 
@@ -2310,6 +2365,7 @@ namespace StockSharp.Messages
 							ServerTime = level1.ServerTime,
 							Bids = _prevBidPrice == null ? ArrayHelper.Empty<QuoteChange>() : new[] { new QuoteChange(_prevBidPrice.Value, _prevBidVolume ?? 0) },
 							Asks = _prevAskPrice == null ? ArrayHelper.Empty<QuoteChange>() : new[] { new QuoteChange(_prevAskPrice.Value, _prevAskVolume ?? 0) },
+							BuildFrom = level1.BuildFrom ?? DataType.Level1,
 						};
 
 						return true;
@@ -2642,6 +2698,7 @@ namespace StockSharp.Messages
 				{
 					SecurityId = quote.SecurityId,
 					ServerTime = quote.ServerTime,
+					BuildFrom = quote.BuildFrom ?? DataType.MarketDepth,
 				};
 
 				if (quote.Bids.Length > 0)
@@ -2734,6 +2791,235 @@ namespace StockSharp.Messages
 		private static bool Verify(QuoteChange quote)
 		{
 			return quote.Price > 0 && quote.Volume > 0;
+		}
+
+		/// <summary>
+		/// Determines the specified message is matched lookup criteria.
+		/// </summary>
+		/// <param name="message">Message.</param>
+		/// <param name="criteria">The message which fields will be used as a filter.</param>
+		/// <returns>Check result.</returns>
+		public static bool IsMatch(this ISubscriptionIdMessage message, ISubscriptionMessage criteria)
+		{
+			switch (message.Type)
+			{
+				case MessageTypes.Security:
+				{
+					if (criteria is SecurityLookupMessage lookupMsg)
+						return ((SecurityMessage)message).IsMatch(lookupMsg);
+
+					return true;
+				}
+				case MessageTypes.Board:
+				{
+					if (criteria is BoardLookupMessage lookupMsg)
+						return ((BoardMessage)message).IsMatch(lookupMsg);
+
+					return true;
+				}
+				case MessageTypes.Portfolio:
+				{
+					if (criteria is PortfolioLookupMessage lookupMsg)
+						return ((PortfolioMessage)message).IsMatch(lookupMsg, true);
+
+					return true;
+				}
+				case MessageTypes.PositionChange:
+				{
+					if (criteria is PortfolioLookupMessage lookupMsg)
+						return ((PositionChangeMessage)message).IsMatch(lookupMsg, true);
+
+					return true;
+				}
+				case MessageTypes.Execution:
+				{
+					var execMsg = (ExecutionMessage)message;
+
+					if (execMsg.IsMarketData())
+					{
+						//if (criteria is MarketDataMessage mdMsg)
+						//	return execMsg.IsMatch(mdMsg);
+
+						return true;
+					}
+					else
+					{
+						if (criteria is OrderStatusMessage statusMsg)
+							return execMsg.IsMatch(statusMsg);
+
+						return true;
+					}
+				}
+				//case MessageTypes.QuoteChange:
+				//{
+				//	if (criteria is MarketDataMessage mdMsg)
+				//		return ((QuoteChangeMessage)message).IsMatch(mdMsg);
+
+				//	return true;
+				//}
+
+				default:
+				{
+					//if (message.Type.IsCandle())
+					//{
+					//	if (criteria is MarketDataMessage mdMsg)
+					//		return message.IsMatch(mdMsg);
+
+					//	return true;
+					//}
+
+					return true;
+				}
+			}
+		}
+
+		/// <summary>
+		/// Determines the specified message is matched lookup criteria.
+		/// </summary>
+		/// <param name="board">Board.</param>
+		/// <param name="criteria">The message which fields will be used as a filter.</param>
+		/// <returns>Check result.</returns>
+		public static bool IsMatch(this BoardMessage board, BoardLookupMessage criteria)
+		{
+			if (board is null)
+				throw new ArgumentNullException(nameof(board));
+
+			if (criteria is null)
+				throw new ArgumentNullException(nameof(criteria));
+
+			if (!criteria.Like.IsEmpty() && !board.Code.ContainsIgnoreCase(criteria.Like))
+				return false;
+
+			return true;
+		}
+
+		/// <summary>
+		/// Determines the specified message is matched lookup criteria.
+		/// </summary>
+		/// <param name="portfolio">Portfolio.</param>
+		/// <param name="criteria">The message which fields will be used as a filter.</param>
+		/// <param name="compareName">Fully compare <see cref="PortfolioMessage.PortfolioName"/>.</param>
+		/// <returns>Check result.</returns>
+		public static bool IsMatch(this PortfolioMessage portfolio, PortfolioLookupMessage criteria, bool compareName)
+		{
+			if (portfolio is null)
+				throw new ArgumentNullException(nameof(portfolio));
+
+			if (criteria is null)
+				throw new ArgumentNullException(nameof(criteria));
+
+			if (!criteria.PortfolioName.IsEmpty())
+			{
+				if (compareName && !!portfolio.PortfolioName.CompareIgnoreCase(criteria.PortfolioName))
+					return false;
+				else if (!compareName && !portfolio.PortfolioName.ContainsIgnoreCase(criteria.PortfolioName))
+					return false;
+			}
+
+			if (!criteria.BoardCode.IsEmpty() && !portfolio.BoardCode.CompareIgnoreCase(criteria.BoardCode))
+				return false;
+
+			if (!criteria.ClientCode.IsEmpty() && !portfolio.ClientCode.CompareIgnoreCase(criteria.ClientCode))
+				return false;
+
+			if (criteria.Currency != null && portfolio.Currency != criteria.Currency)
+				return false;
+
+			return true;
+		}
+
+		/// <summary>
+		/// Determines the specified message is matched lookup criteria.
+		/// </summary>
+		/// <param name="position">Position.</param>
+		/// <param name="criteria">The message which fields will be used as a filter.</param>
+		/// <param name="compareName">Fully compare <see cref="PositionChangeMessage.PortfolioName"/>.</param>
+		/// <returns>Check result.</returns>
+		public static bool IsMatch(this PositionChangeMessage position, PortfolioLookupMessage criteria, bool compareName)
+		{
+			if (position is null)
+				throw new ArgumentNullException(nameof(position));
+
+			if (criteria is null)
+				throw new ArgumentNullException(nameof(criteria));
+
+			if (!criteria.PortfolioName.IsEmpty())
+			{
+				if (compareName && !!position.PortfolioName.CompareIgnoreCase(criteria.PortfolioName))
+					return false;
+				else if (!compareName && !position.PortfolioName.ContainsIgnoreCase(criteria.PortfolioName))
+					return false;
+			}
+
+			if (criteria.SecurityId != null && position.SecurityId != criteria.SecurityId.Value)
+				return false;
+
+			if (!criteria.BoardCode.IsEmpty() && !position.BoardCode.CompareIgnoreCase(criteria.BoardCode))
+				return false;
+
+			if (!criteria.ClientCode.IsEmpty() && !position.ClientCode.CompareIgnoreCase(criteria.ClientCode))
+				return false;
+
+			if (!criteria.StrategyId.IsEmpty() && !position.StrategyId.CompareIgnoreCase(criteria.StrategyId))
+				return false;
+
+			return true;
+		}
+
+		/// <summary>
+		/// Determines the specified message is matched lookup criteria.
+		/// </summary>
+		/// <param name="transaction">Transaction.</param>
+		/// <param name="criteria">The message which fields will be used as a filter.</param>
+		/// <returns>Check result.</returns>
+		public static bool IsMatch(this ExecutionMessage transaction, OrderStatusMessage criteria)
+		{
+			if (transaction.IsMarketData())
+				throw new ArgumentException(nameof(transaction));
+
+			if (criteria is null)
+				throw new ArgumentNullException(nameof(criteria));
+
+			return transaction.IsMatch(criteria, criteria.States.ToHashSet());
+		}
+
+		/// <summary>
+		/// Determines the specified transaction is matched lookup criteria.
+		/// </summary>
+		/// <param name="transaction">Transaction.</param>
+		/// <param name="criteria">The order which fields will be used as a filter.</param>
+		/// <param name="states">Filter order by the specified states.</param>
+		/// <returns>Check result.</returns>
+		public static bool IsMatch(this ExecutionMessage transaction, OrderStatusMessage criteria, ISet<OrderStates> states)
+		{
+			if (transaction.IsMarketData())
+				throw new ArgumentException(nameof(transaction));
+
+			if (criteria is null)
+				throw new ArgumentNullException(nameof(criteria));
+
+			if (states is null)
+				throw new ArgumentNullException(nameof(states));
+
+			if (criteria.SecurityId != default && criteria.SecurityId != transaction.SecurityId)
+				return false;
+
+			if (states.Count > 0 && transaction.OrderState != null && !states.Contains(transaction.OrderState.Value))
+				return false;
+
+			if (criteria.Side != default && criteria.Side != transaction.Side)
+				return false;
+
+			if (criteria.Volume != default && criteria.Volume != transaction.OrderVolume)
+				return false;
+
+			if (!criteria.StrategyId.IsEmpty() && !criteria.StrategyId.CompareIgnoreCase(transaction.StrategyId))
+				return false;
+
+			if (!criteria.PortfolioName.IsEmpty() && !criteria.PortfolioName.CompareIgnoreCase(transaction.PortfolioName))
+				return false;
+
+			return true;
 		}
 
 		/// <summary>
@@ -3004,6 +3290,8 @@ namespace StockSharp.Messages
 			else if (type == DataType.News)
 				return MessageTypes.News;
 			else if (type == DataType.Board)
+				return MessageTypes.Board;
+			else if (type == DataType.BoardState)
 				return MessageTypes.BoardState;
 			else if (type == DataType.Securities)
 				return MessageTypes.Security;
@@ -3017,7 +3305,7 @@ namespace StockSharp.Messages
 				return type.MessageType.ToMessageType();
 			else 
 			{
-				return _messageTypes.SafeAdd(type, key => key.MessageType.CreateInstance<Message>().Type);
+				return _messageTypes.SafeAdd(type, key => key.MessageType.ToMessageType());
 				//throw new ArgumentOutOfRangeException(nameof(type), type, LocalizedStrings.Str1219);
 			}
 		}

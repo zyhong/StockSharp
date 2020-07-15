@@ -22,7 +22,8 @@ namespace SampleConnection
 
 	public partial class SecuritiesWindow
 	{
-		private readonly SynchronizedDictionary<Security, QuotesWindow> _quotesWindows = new SynchronizedDictionary<Security, QuotesWindow>();
+		private readonly SynchronizedDictionary<Security, CachedSynchronizedList<QuotesWindow>> _quotesWindows = new SynchronizedDictionary<Security, CachedSynchronizedList<QuotesWindow>>();
+		private readonly SynchronizedDictionary<Subscription, QuotesWindow> _quotesWindowsBySubscription = new SynchronizedDictionary<Subscription, QuotesWindow>();
 		private readonly SynchronizedList<ChartWindow> _chartWindows = new SynchronizedList<ChartWindow>();
 		private bool _initialized;
 		private bool _appClosing;
@@ -63,7 +64,8 @@ namespace SampleConnection
 		protected override void OnClosed(EventArgs e)
 		{
 			_appClosing = true;
-			_quotesWindows.SyncDo(d => d.Values.ForEach(w => w.Close()));
+			_quotesWindows.SyncDo(d => d.Values.ForEach(w => w.Cache.ForEach(w1 => w1.Close())));
+			_quotesWindowsBySubscription.SyncDo(d => d.Values.ForEach(w => w.Close()));
 
 			_chartWindows.SyncDo(c => c.ToArray().ForEach(w =>
 			{
@@ -76,10 +78,52 @@ namespace SampleConnection
 			if (connector != null)
 			{
 				if (_initialized)
-					connector.MarketDepthReceived -= TraderOnMarketDepthChanged;
+					connector.MarketDepthReceived -= TraderOnMarketDepthReceived;
 			}
 
 			base.OnClosed(e);
+		}
+
+		public void ProcessOrder(Order order)
+		{
+			lock (_quotesWindows.SyncRoot)
+			{
+				foreach (var pair in _quotesWindows)
+				{
+					if (pair.Key != order.Security)
+						continue;
+
+					pair.Value.Cache.ForEach(wnd => wnd.ProcessOrder(order));
+				}
+			}
+		}
+
+		public void ProcessOrderCancelFail(OrderFail fail)
+		{
+			lock (_quotesWindows.SyncRoot)
+			{
+				foreach (var pair in _quotesWindows)
+				{
+					if (pair.Key != fail.Order.Security)
+						continue;
+
+					pair.Value.Cache.ForEach(wnd => wnd.ProcessOrderCancelFail(fail));
+				}
+			}
+		}
+
+		public void ProcessOrderRegisterFail(OrderFail fail)
+		{
+			lock (_quotesWindows.SyncRoot)
+			{
+				foreach (var pair in _quotesWindows)
+				{
+					if (pair.Key != fail.Order.Security)
+						continue;
+
+					pair.Value.Cache.ForEach(wnd => wnd.ProcessOrderRegisterFail(fail));
+				}
+			}
 		}
 
 		private void NewOrderClick(object sender, RoutedEventArgs e)
@@ -88,7 +132,11 @@ namespace SampleConnection
 
 			var newOrder = new OrderWindow
 			{
-				Order = new Order { Security = SecurityPicker.SelectedSecurity },
+				Order = new Order
+				{
+					Security = SecurityPicker.SelectedSecurity,
+					Portfolio = connector.Portfolios.FirstOrDefault(),
+				},
 			}.Init(connector);
 
 			if (newOrder.ShowModal(this))
@@ -98,7 +146,8 @@ namespace SampleConnection
 		private void SecurityPicker_OnSecuritySelected(Security security)
 		{
 			Level1.IsEnabled = Level1Hist.IsEnabled = Ticks.IsEnabled = TicksHist.IsEnabled =
-				OrderLog.IsEnabled = NewOrder.IsEnabled = Depth.IsEnabled = DepthAdvanced.IsEnabled = security != null;
+				OrderLog.IsEnabled = NewOrder.IsEnabled = Depth.IsEnabled =
+				DepthAdvanced.IsEnabled = DepthFiltered.IsEnabled = security != null;
 
 			TryEnableCandles();
 		}
@@ -118,13 +167,27 @@ namespace SampleConnection
 			SubscribeDepths(null);
 		}
 
-		private void SubscribeDepths(DepthSettings settings)
+		private void TraderOnMarketDepthReceived(Subscription subscription, MarketDepth depth)
+		{
+			if (subscription.DataType == DataType.FilteredMarketDepth)
+			{
+				if (_quotesWindowsBySubscription.TryGetValue(subscription, out var wnd))
+					wnd.DepthCtrl.UpdateDepth(depth);
+			}
+			else
+			{
+				if (_quotesWindows.TryGetValue(depth.Security, out var list))
+					list.Cache.ForEach(wnd => wnd.DepthCtrl.UpdateDepth(depth));
+			}
+		}
+
+		private void DepthFilteredClick(object sender, RoutedEventArgs e)
 		{
 			var connector = Connector;
 
 			if (!_initialized)
 			{
-				connector.MarketDepthReceived += TraderOnMarketDepthChanged;
+				connector.MarketDepthReceived += TraderOnMarketDepthReceived;
 				_initialized = true;
 			}
 
@@ -133,16 +196,17 @@ namespace SampleConnection
 				// create order book window
 				var window = new QuotesWindow
 				{
-					Title = security.Id + " " + LocalizedStrings.MarketDepth
+					Title = security.Id + " " + LocalizedStrings.MarketDepth,
+					Security = security,
 				};
 
 				//window.DepthCtrl.UpdateDepth(connector.GetMarketDepth(security));
 				window.Show();
 				
 				// subscribe on order book flow
-				var subscription = connector.SubscribeMarketDepth(security, settings?.From, settings?.To, buildMode: settings?.BuildMode ?? MarketDataBuildModes.LoadAndBuild, maxDepth: settings?.MaxDepth, buildFrom: settings?.BuildFrom);
+				var subscription = connector.SubscribeFilteredMarketDepth(security);
 
-				_quotesWindows[security] = window;
+				_quotesWindowsBySubscription.Add(subscription, window);
 
 				window.Closed += (s, e) =>
 				{
@@ -155,14 +219,59 @@ namespace SampleConnection
 			}
 		}
 
+		private void SubscribeDepths(DepthSettings settings)
+		{
+			var connector = Connector;
+
+			if (!_initialized)
+			{
+				connector.MarketDepthReceived += TraderOnMarketDepthReceived;
+				_initialized = true;
+			}
+
+			foreach (var security in SecurityPicker.SelectedSecurities)
+			{
+				// create order book window
+				var window = new QuotesWindow
+				{
+					Title = security.Id + " " + LocalizedStrings.MarketDepth,
+					Security = security,
+				};
+
+				//window.DepthCtrl.UpdateDepth(connector.GetMarketDepth(security));
+				window.Show();
+				
+				// subscribe on order book flow
+				var subscription = connector.SubscribeMarketDepth(security, settings?.From, settings?.To, buildMode: settings?.BuildMode ?? MarketDataBuildModes.LoadAndBuild, maxDepth: settings?.MaxDepth, buildFrom: settings?.BuildFrom);
+
+				_quotesWindows.SafeAdd(security).Add(window);
+
+				window.Closed += (s, e) =>
+				{
+					if (_appClosing)
+						return;
+
+					if (subscription.State.IsActive())
+						connector.UnSubscribe(subscription);
+				};
+			}
+		}
+
+		private Subscription FindSubscription(Security security, DataType dataType)
+		{
+			return Connector.FindSubscriptions(security, dataType).Where(s => s.SubscriptionMessage.To == null && s.State.IsActive()).FirstOrDefault();
+		}
+
 		private void Level1Click(object sender, RoutedEventArgs e)
 		{
 			var connector = Connector;
 
 			foreach (var security in SecurityPicker.SelectedSecurities)
 			{
-				if (connector.RegisteredSecurities.Contains(security))
-					connector.UnSubscribeLevel1(security);
+				var subscription = FindSubscription(security, DataType.Level1);
+
+				if (subscription != null)
+					connector.UnSubscribe(subscription);
 				else
 					connector.SubscribeLevel1(security);
 			}
@@ -189,8 +298,10 @@ namespace SampleConnection
 
 			foreach (var security in SecurityPicker.SelectedSecurities)
 			{
-				if (connector.RegisteredTrades.Contains(security))
-					connector.UnSubscribeTrades(security);
+				var subscription = FindSubscription(security, DataType.Ticks);
+
+				if (subscription != null)
+					connector.UnSubscribe(subscription);
 				else
 					connector.SubscribeTrades(security);
 			}
@@ -217,17 +328,13 @@ namespace SampleConnection
 
 			foreach (var security in SecurityPicker.SelectedSecurities)
 			{
-				if (connector.RegisteredOrderLogs.Contains(security))
-					connector.UnSubscribeOrderLog(security);
+				var subscription = FindSubscription(security, DataType.OrderLog);
+
+				if (subscription != null)
+					connector.UnSubscribe(subscription);
 				else
 					connector.SubscribeOrderLog(security);
 			}
-		}
-
-		private void TraderOnMarketDepthChanged(Subscription subscription, MarketDepth depth)
-		{
-			if (_quotesWindows.TryGetValue(depth.Security, out var wnd))
-				wnd.DepthCtrl.UpdateDepth(depth);
 		}
 
 		private void FindClick(object sender, RoutedEventArgs e)

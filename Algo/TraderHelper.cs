@@ -26,7 +26,6 @@ namespace StockSharp.Algo
 
 	using MoreLinq;
 
-	using StockSharp.Algo.Positions;
 	using StockSharp.Algo.Storages;
 	using StockSharp.Algo.Testing;
 	using StockSharp.BusinessEntities;
@@ -375,30 +374,12 @@ namespace StockSharp.Algo
 			if (trade == null)
 				throw new ArgumentNullException(nameof(trade));
 
-			return trade.ToMessage().GetPosition(false);
-		}
+			var position = trade.Trade.Volume;
 
-		/// <summary>
-		/// To get the position on own trade.
-		/// </summary>
-		/// <param name="message">Own trade, used for position calculation. At buy the trade volume <see cref="ExecutionMessage.TradeVolume"/> is taken with positive sign, at sell - with negative.</param>
-		/// <param name="byOrder">To check implemented volume by order balance (<see cref="ExecutionMessage.Balance"/>) or by received trades. The default is checked by the order.</param>
-		/// <returns>Position.</returns>
-		public static decimal? GetPosition(this ExecutionMessage message, bool byOrder)
-		{
-			if (message == null)
-				throw new ArgumentNullException(nameof(message));
+			if (trade.Order.Direction == Sides.Sell)
+				position *= -1;
 
-			var sign = message.Side == Sides.Buy ? 1 : -1;
-
-			decimal? position;
-
-			if (byOrder)
-				position = message.OrderVolume - message.Balance;
-			else
-				position = message.TradeVolume;
-
-			return position * sign;
+			return position;
 		}
 
 		/// <summary>
@@ -2021,72 +2002,6 @@ namespace StockSharp.Algo
 			}
 		}
 
-		private sealed class NativePositionManager : IPositionManager
-		{
-			private readonly Position _position;
-
-			public NativePositionManager(Position position)
-			{
-				_position = position ?? throw new ArgumentNullException(nameof(position));
-			}
-
-			/// <summary>
-			/// The position aggregate value.
-			/// </summary>
-			decimal IPositionManager.Position
-			{
-				get => _position.CurrentValue ?? 0;
-				set => throw new NotSupportedException();
-			}
-
-			SecurityId? IPositionManager.SecurityId
-			{
-				get => _position.Security.ToSecurityId();
-				set => throw new NotSupportedException();
-			}
-
-			event Action<Tuple<SecurityId, string>, decimal> IPositionManager.NewPosition
-			{
-				add { }
-				remove { }
-			}
-
-			event Action<Tuple<SecurityId, string>, decimal> IPositionManager.PositionChanged
-			{
-				add { }
-				remove { }
-			}
-
-			IEnumerable<KeyValuePair<Tuple<SecurityId, string>, decimal>> IPositionManager.Positions
-			{
-				get => throw new NotSupportedException();
-				set => throw new NotSupportedException();
-			}
-
-			void IPositionManager.Reset()
-			{
-				throw new NotSupportedException();
-			}
-
-			decimal? IPositionManager.ProcessMessage(Message message)
-			{
-				throw new NotSupportedException();
-			}
-		}
-
-		/// <summary>
-		/// Convert the position object to the type <see cref="IPositionManager"/>.
-		/// </summary>
-		/// <param name="position">Position.</param>
-		/// <returns>Position calc manager.</returns>
-		public static IPositionManager ToPositionManager(this Position position)
-		{
-			if (position == null)
-				throw new ArgumentNullException(nameof(position));
-
-			return new NativePositionManager(position);
-		}
-
 		/// <summary>
 		/// Write order info to the log.
 		/// </summary>
@@ -2132,8 +2047,9 @@ namespace StockSharp.Algo
 		/// <param name="newState">New state.</param>
 		/// <param name="subscriptionId">Subscription id.</param>
 		/// <param name="receiver">Logs.</param>
+		/// <param name="isInfoLevel">Use <see cref="LogLevels.Info"/> for log message.</param>
 		/// <returns>New state.</returns>
-		public static SubscriptionStates ChangeSubscriptionState(this SubscriptionStates currState, SubscriptionStates newState, long subscriptionId, ILogReceiver receiver)
+		public static SubscriptionStates ChangeSubscriptionState(this SubscriptionStates currState, SubscriptionStates newState, long subscriptionId, ILogReceiver receiver, bool isInfoLevel = true)
 		{
 			bool isOk;
 
@@ -2162,7 +2078,12 @@ namespace StockSharp.Algo
 			const string text = "Subscription {0} {1}->{2}.";
 
 			if (isOk)
-				receiver.AddInfoLog(text, subscriptionId, currState, newState);
+			{
+				if (isInfoLevel)
+					receiver.AddInfoLog(text, subscriptionId, currState, newState);
+				else
+					receiver.AddDebugLog(text, subscriptionId, currState, newState);
+			}
 			else
 				receiver.AddWarningLog(text, subscriptionId, currState, newState);
 
@@ -2969,13 +2890,14 @@ namespace StockSharp.Algo
 		/// <param name="storage">Storage.</param>
 		/// <param name="portfolio">Portfolio.</param>
 		/// <param name="security">Security.</param>
+		/// <param name="strategyId">Strategy ID.</param>
 		/// <param name="clientCode">Client code.</param>
 		/// <param name="depoName">Depo name.</param>
 		/// <param name="limitType">Limit type.</param>
 		/// <param name="creator">Creator.</param>
 		/// <param name="isNew">Is newly created.</param>
 		/// <returns>Position.</returns>
-		public static Position GetOrCreatePosition(this IPositionStorage storage, Portfolio portfolio, Security security, string clientCode, string depoName, TPlusLimits? limitType, Func<Portfolio, Security, string, string, TPlusLimits?, Position> creator, out bool isNew)
+		public static Position GetOrCreatePosition(this IPositionStorage storage, Portfolio portfolio, Security security, string strategyId, string clientCode, string depoName, TPlusLimits? limitType, Func<Portfolio, Security, string, string, string, TPlusLimits?, Position> creator, out bool isNew)
 		{
 			if (storage is null)
 				throw new ArgumentNullException(nameof(storage));
@@ -2991,11 +2913,11 @@ namespace StockSharp.Algo
 
 			lock (storage.SyncRoot)
 			{
-				var position = storage.GetPosition(portfolio, security, clientCode, depoName, limitType);
+				var position = storage.GetPosition(portfolio, security, strategyId, clientCode, depoName, limitType);
 
 				if (position == null)
 				{
-					position = creator(portfolio, security, clientCode, depoName, limitType);
+					position = creator(portfolio, security, strategyId, clientCode, depoName, limitType);
 					storage.Save(position);
 					isNew = true;
 				}
@@ -3603,15 +3525,17 @@ namespace StockSharp.Algo
 		/// </summary>
 		/// <param name="connector">The connection of interaction with trade systems.</param>
 		/// <param name="offlineMode">Offline mode handling message.</param>
-		public static void LookupAll(this IConnector connector, MessageOfflineModes offlineMode = MessageOfflineModes.Cancel)
+		public static void LookupAll(this Connector connector, MessageOfflineModes offlineMode = MessageOfflineModes.Cancel)
 		{
 			if (connector == null)
 				throw new ArgumentNullException(nameof(connector));
 
+#pragma warning disable CS0618 // Type or member is obsolete
 			connector.LookupBoards(new ExchangeBoard(), offlineMode: offlineMode);
 			connector.LookupSecurities(LookupAllCriteria, offlineMode: offlineMode);
 			connector.LookupPortfolios(new Portfolio(), offlineMode: offlineMode);
 			connector.LookupOrders(new Order(), offlineMode: offlineMode);
+#pragma warning restore CS0618 // Type or member is obsolete
 		}
 
 		/// <summary>
@@ -3846,18 +3770,7 @@ namespace StockSharp.Algo
 		/// <param name="criteria">Criteria.</param>
 		/// <returns>Found boards.</returns>
 		public static IEnumerable<ExchangeBoard> Filter(this IEnumerable<ExchangeBoard> boards, BoardLookupMessage criteria)
-		{
-			if (boards == null)
-				throw new ArgumentNullException(nameof(boards));
-
-			if (criteria == null)
-				throw new ArgumentNullException(nameof(criteria));
-
-			if (!criteria.Like.IsEmpty())
-				boards = boards.Where(b => b.Code.ContainsIgnoreCase(criteria.Like));
-
-			return boards;
-		}
+			=> boards.Where(b => b.ToMessage().IsMatch(criteria));
 
 		/// <summary>
 		/// Filter portfolios by the specified criteria.
@@ -3866,24 +3779,7 @@ namespace StockSharp.Algo
 		/// <param name="criteria">Criteria.</param>
 		/// <returns>Found portfolios.</returns>
 		public static IEnumerable<Portfolio> Filter(this IEnumerable<Portfolio> portfolios, PortfolioLookupMessage criteria)
-		{
-			if (portfolios == null)
-				throw new ArgumentNullException(nameof(portfolios));
-
-			if (criteria == null)
-				throw new ArgumentNullException(nameof(criteria));
-
-			if (!criteria.PortfolioName.IsEmpty())
-				portfolios = portfolios.Where(p => p.Name.ContainsIgnoreCase(criteria.PortfolioName));
-
-			if (criteria.Currency != null)
-				portfolios = portfolios.Where(p => p.Currency == criteria.Currency);
-
-			if (!criteria.BoardCode.IsEmpty())
-				portfolios = portfolios.Where(p => p.Board?.Code.ContainsIgnoreCase(criteria.BoardCode) == true);
-
-			return portfolios;
-		}
+			=> portfolios.Where(p => p.ToMessage().IsMatch(criteria, false));
 
 		/// <summary>
 		/// Filter positions the specified criteria.
@@ -3892,27 +3788,7 @@ namespace StockSharp.Algo
 		/// <param name="criteria">Criteria.</param>
 		/// <returns>Found positions.</returns>
 		public static IEnumerable<Position> Filter(this IEnumerable<Position> positions, PortfolioLookupMessage criteria)
-		{
-			if (positions == null)
-				throw new ArgumentNullException(nameof(positions));
-
-			if (criteria == null)
-				throw new ArgumentNullException(nameof(criteria));
-
-			if (!criteria.PortfolioName.IsEmpty())
-				positions = positions.Where(p => p.Portfolio.Name.ContainsIgnoreCase(criteria.PortfolioName));
-
-			if (criteria.Currency != null)
-				positions = positions.Where(p => p.Currency == criteria.Currency);
-
-			if (criteria.SecurityId != null)
-				positions = positions.Where(p => p.Security.ToSecurityId() == criteria.SecurityId.Value);
-
-			if (!criteria.BoardCode.IsEmpty())
-				positions = positions.Where(p => p.Security.ToSecurityId().BoardCode.ContainsIgnoreCase(criteria.BoardCode));
-
-			return positions;
-		}
+			=> positions.Where(p => p.ToChangeMessage().IsMatch(criteria, false));
 
 		/// <summary>
 		/// Reregister the order.

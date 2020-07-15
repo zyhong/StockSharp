@@ -105,6 +105,13 @@ namespace StockSharp.Algo.Strategies
 		}
 
 		/// <inheritdoc />
+		public event Action<Subscription, OrderFail> OrderEditFailReceived
+		{
+			add => SubscriptionProvider.OrderEditFailReceived += value;
+			remove => SubscriptionProvider.OrderEditFailReceived -= value;
+		}
+
+		/// <inheritdoc />
 		public event Action<Subscription, Portfolio> PortfolioReceived
 		{
 			add => SubscriptionProvider.PortfolioReceived += value;
@@ -156,6 +163,12 @@ namespace StockSharp.Algo.Strategies
 		/// <inheritdoc />
 		public void Subscribe(Subscription subscription)
 		{
+			Subscribe(subscription, false);
+		}
+
+		private void Subscribe(Subscription subscription, bool isGlobal)
+		{
+			_subscriptions.Add(subscription, isGlobal);
 			SubscriptionProvider.Subscribe(subscription);
 		}
 

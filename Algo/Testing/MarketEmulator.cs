@@ -16,7 +16,6 @@ Copyright 2010 by StockSharp, LLC
 namespace StockSharp.Algo.Testing
 {
 	using System;
-	using System.Collections;
 	using System.Collections.Generic;
 	using System.Linq;
 
@@ -31,58 +30,6 @@ namespace StockSharp.Algo.Testing
 	using StockSharp.Localization;
 	using StockSharp.BusinessEntities;
 	using StockSharp.Algo.Storages;
-
-	class LevelQuotes : IEnumerable<ExecutionMessage>
-	{
-		private readonly List<ExecutionMessage> _quotes = new List<ExecutionMessage>();
-		private readonly Dictionary<long, ExecutionMessage> _quotesByTrId = new Dictionary<long, ExecutionMessage>();
-
-		public int Count => _quotes.Count;
-
-		public ExecutionMessage this[int i]
-		{
-			get => _quotes[i];
-			set
-			{
-				var prev = _quotes[i];
-
-				if (prev.TransactionId != 0)
-					_quotesByTrId.Remove(prev.TransactionId);
-
-				_quotes[i] = value;
-
-				if (value.TransactionId != 0)
-					_quotesByTrId[value.TransactionId] = value;
-			}
-		}
-
-		public ExecutionMessage TryGetByTransactionId(long transactionId) => _quotesByTrId.TryGetValue(transactionId);
-
-		public void Add(ExecutionMessage quote)
-		{
-			_quotes.Add(quote);
-
-			if (quote.TransactionId != 0)
-				_quotesByTrId[quote.TransactionId] = quote;
-		}
-
-		public void RemoveAt(int index, ExecutionMessage quote = null)
-		{
-			if (quote == null)
-				quote = _quotes[index];
-
-			_quotes.RemoveAt(index);
-
-			if (quote.TransactionId != 0)
-				_quotesByTrId.Remove(quote.TransactionId);
-		}
-
-		public void Remove(ExecutionMessage quote) => RemoveAt(_quotes.IndexOf(quote), quote);
-
-		public IEnumerator<ExecutionMessage> GetEnumerator() => _quotes.GetEnumerator();
-
-		IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
-	}
 
 	/// <summary>
 	/// Emulator.
@@ -509,13 +456,20 @@ namespace StockSharp.Algo.Testing
 					.RemoveTrailingZeros();
 			}
 
-			private static ExecutionMessage CreateReply(ExecutionMessage original, DateTimeOffset time)
+			private static ExecutionMessage CreateReply(ExecutionMessage original, DateTimeOffset time, Exception error)
 			{
-				var replyMsg = original.TypedClone();
+				var replyMsg = new ExecutionMessage
+				{
+					HasOrderInfo = true,
+					ExecutionType = ExecutionTypes.Transaction,
+					ServerTime = time,
+					LocalTime = time,
+					OriginalTransactionId = original.TransactionId,
+					Error = error,
+				};
 
-				replyMsg.ServerTime = time;
-				replyMsg.LocalTime = time;
-				replyMsg.OriginalTransactionId = original.TransactionId;
+				if (error != null)
+					replyMsg.OrderState = OrderStates.Failed;
 
 				return replyMsg;
 			}
@@ -528,12 +482,10 @@ namespace StockSharp.Algo.Testing
 					{
 						this.AddErrorLog(LocalizedStrings.Str1151Params, execution.IsCancellation ? LocalizedStrings.Str1152 : LocalizedStrings.Str1153, execution.OriginalTransactionId == 0 ? execution.TransactionId : execution.OriginalTransactionId);
 
-						var replyMsg = CreateReply(execution, time);
+						var replyMsg = CreateReply(execution, time, new InvalidOperationException(LocalizedStrings.Str1154));
 
 						replyMsg.Balance = execution.OrderVolume;
-						replyMsg.OrderState = OrderStates.Failed;
-						replyMsg.Error = new InvalidOperationException(LocalizedStrings.Str1154);
-						replyMsg.LocalTime = time;
+
 						result.Add(replyMsg);
 						return;
 					}
@@ -541,24 +493,23 @@ namespace StockSharp.Algo.Testing
 
 				if (execution.IsCancellation)
 				{
-					var order = _activeOrders.TryGetValue(execution.OriginalTransactionId);
-
-					if (_activeOrders.Remove(execution.OriginalTransactionId))
+					if (_activeOrders.TryGetAndRemove(execution.OriginalTransactionId, out var order))
 					{
-						var replyMsg = CreateReply(order, time);
-
-						replyMsg.OriginalTransactionId = execution.OriginalTransactionId;
-						replyMsg.OrderState = OrderStates.Done;
-						_expirableOrders.Remove(replyMsg);
+						_expirableOrders.Remove(order);
 
 						// изменяем текущие котировки, добавляя туда наши цену и объем
 						UpdateQuote(order, false);
 
 						// отправляем измененный стакан
 						result.Add(CreateQuoteMessage(
-							replyMsg.SecurityId,
+							order.SecurityId,
 							time,
 							GetServerTime(time)));
+
+						var replyMsg = CreateReply(order, time, null);
+
+						//replyMsg.OriginalTransactionId = execution.OriginalTransactionId;
+						replyMsg.OrderState = OrderStates.Done;
 
 						result.Add(replyMsg);
 
@@ -570,12 +521,7 @@ namespace StockSharp.Algo.Testing
 					}
 					else
 					{
-						var replyMsg = CreateReply(execution, time);
-
-						replyMsg.OrderState = OrderStates.Failed;
-						replyMsg.Error = new InvalidOperationException(LocalizedStrings.Str1156Params.Put(replyMsg.OrderId));
-
-						result.Add(replyMsg);
+						result.Add(CreateReply(execution, time, new InvalidOperationException(LocalizedStrings.Str1156Params.Put(execution.OriginalTransactionId))));
 
 						this.AddErrorLog(LocalizedStrings.Str1156Params, execution.OriginalTransactionId);
 					}
@@ -584,59 +530,54 @@ namespace StockSharp.Algo.Testing
 				{
 					var message = _parent.CheckRegistration(execution, _securityDefinition/*, result*/);
 
-					var replyMsg = CreateReply(execution, time);
+					var replyMsg = CreateReply(execution, time, message == null ? null : new InvalidOperationException(message));
+					result.Add(replyMsg);
 
 					if (message == null)
 					{
 						this.AddInfoLog(LocalizedStrings.Str1157Params, execution.TransactionId);
 
 						// при восстановлении заявки у нее уже есть номер
-						if (replyMsg.OrderId == null)
+						if (execution.OrderId == null)
 						{
-							replyMsg.Balance = execution.OrderVolume;
-							replyMsg.OrderState = OrderStates.Active;
-							replyMsg.OrderId = _parent.OrderIdGenerator.GetNextId();
+							execution.Balance = execution.OrderVolume;
+							execution.OrderState = OrderStates.Active;
+							execution.OrderId = _parent.OrderIdGenerator.GetNextId();
 						}
 						else
-							replyMsg.ServerTime = execution.ServerTime; // при восстановлении не меняем время
-
-						result.Add(replyMsg);
+							execution.ServerTime = execution.ServerTime; // при восстановлении не меняем время
 
 						replyMsg.Commission = _parent
 							.GetPortfolioInfo(execution.PortfolioName)
 							.ProcessOrder(execution, null, result);
 
-						MatchOrder(execution.LocalTime, replyMsg, result, true);
+						MatchOrder(execution.LocalTime, execution, result, true);
 
-						if (replyMsg.OrderState == OrderStates.Active)
+						if (execution.OrderState == OrderStates.Active)
 						{
-							_activeOrders.Add(execution.TransactionId, replyMsg);
+							_activeOrders.Add(execution.TransactionId, execution);
 
-							if (replyMsg.ExpiryDate != null)
-								_expirableOrders.Add(replyMsg, replyMsg.ExpiryDate.Value.EndOfDay() - replyMsg.LocalTime);
+							if (execution.ExpiryDate != null)
+								_expirableOrders.Add(execution, execution.ExpiryDate.Value.EndOfDay() - time);
 
 							// изменяем текущие котировки, добавляя туда наши цену и объем
-							UpdateQuote(replyMsg, true);
+							UpdateQuote(execution, true);
 						}
-						else if (replyMsg.IsCanceled())
+						else if (execution.IsCanceled())
 						{
 							_parent
 								.GetPortfolioInfo(execution.PortfolioName)
-								.ProcessOrder(replyMsg, replyMsg.Balance.Value, result);
+								.ProcessOrder(execution, execution.Balance.Value, result);
 						}
 
 						// отправляем измененный стакан
 						result.Add(CreateQuoteMessage(
-							replyMsg.SecurityId,
+							execution.SecurityId,
 							time,
 							GetServerTime(time)));
 					}
 					else
 					{
-						replyMsg.OrderState = OrderStates.Failed;
-						replyMsg.Error = new InvalidOperationException(message);
-						result.Add(replyMsg);
-
 						this.AddInfoLog(LocalizedStrings.Str1158Params, execution.TransactionId, message);
 					}
 				}
@@ -958,7 +899,7 @@ namespace StockSharp.Algo.Testing
 
 				if (isCrossTrade)
 				{
-					var reply = CreateReply(order, time);
+					var reply = CreateReply(order, time, null);
 
 					//reply.OrderState = OrderStates.Failed;
 					//reply.OrderStatus = (long?)OrderStatus.RejectedBySystem;
@@ -979,7 +920,7 @@ namespace StockSharp.Algo.Testing
 
 					var info = _parent.GetPortfolioInfo(order.PortfolioName);
 
-					info.ProcessMyTrade(tradeMsg, result);
+					info.ProcessMyTrade(order.Side, tradeMsg, result);
 
 					result.Add(new ExecutionMessage
 					{
@@ -1486,17 +1427,20 @@ namespace StockSharp.Algo.Testing
 				return commission;
 			}
 
-			public void ProcessMyTrade(ExecutionMessage tradeMsg, ICollection<Message> result)
+			public void ProcessMyTrade(Sides side, ExecutionMessage tradeMsg, ICollection<Message> result)
 			{
 				var time = tradeMsg.ServerTime;
 
 				PnLManager.ProcessMyTrade(tradeMsg, out _);
 				tradeMsg.Commission = _parent._commissionManager.Process(tradeMsg);
 
-				var position = tradeMsg.GetPosition(false);
+				var position = tradeMsg.TradeVolume;
 
 				if (position == null)
 					return;
+
+				if (side == Sides.Sell)
+					position *= -1;
 
 				var money = GetMoney(tradeMsg.SecurityId/*, time, result*/);
 
@@ -2275,6 +2219,11 @@ namespace StockSharp.Algo.Testing
 		bool IMessageAdapter.IsAutoReplyOnTransactonalUnsubscription => true;
 		bool IMessageAdapter.EnqueueSubscriptions { get; set; }
 		bool IMessageAdapter.IsSupportTransactionLog => false;
+		bool IMessageAdapter.UseChannels => false;
+		string IMessageAdapter.FeatureName => string.Empty;
+		bool? IMessageAdapter.IsPositionsEmulationRequired => null;
+		bool IMessageAdapter.IsReplaceCommandEditCurrent => false;
+		bool IMessageAdapter.GenerateOrderBookFromLevel1 { get; set; }
 
 		IOrderLogMarketDepthBuilder IMessageAdapter.CreateOrderLogMarketDepthBuilder(SecurityId securityId)
 			=> new OrderLogMarketDepthBuilder(securityId);

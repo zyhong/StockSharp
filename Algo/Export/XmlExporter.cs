@@ -145,6 +145,7 @@ namespace StockSharp.Algo.Export
 				writer.WriteAttribute("isSystem", item.IsSystem);
 				writer.WriteAttribute("isUpTick", item.IsUpTick);
 				writer.WriteAttribute("userOrderId", item.UserOrderId);
+				writer.WriteAttribute("strategyId", item.StrategyId);
 				writer.WriteAttribute("currency", item.Currency);
 				writer.WriteAttribute("isMargin", item.IsMargin);
 				writer.WriteAttribute("isMarketMaker", item.IsMarketMaker);
@@ -155,6 +156,7 @@ namespace StockSharp.Algo.Export
 				writer.WriteAttribute("positionEffect", item.PositionEffect);
 				writer.WriteAttribute("postOnly", item.PostOnly);
 				writer.WriteAttribute("initiator", item.Initiator);
+				writer.WriteAttribute("seqNum", item.SeqNum);
 
 				writer.WriteEndElement();
 			});
@@ -224,6 +226,7 @@ namespace StockSharp.Algo.Export
 				writer.WriteAttribute("clientCode", message.ClientCode);
 				writer.WriteAttribute("depoName", message.DepoName);
 				writer.WriteAttribute("limit", message.LimitType);
+				writer.WriteAttribute("strategyId", message.StrategyId);
 
 				foreach (var pair in message.Changes.Where(c => !c.Key.IsObsolete()))
 					writer.WriteAttribute(pair.Key.ToString(), (pair.Value as DateTime?)?.ToString(_timeFormat) ?? pair.Value);
